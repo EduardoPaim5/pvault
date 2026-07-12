@@ -112,16 +112,87 @@ static void print_usage(FILE *const stream)
         "  remove QUERY                Delete a credential\n"
         "  list [QUERY]                List credentials\n"
         "  show QUERY                  Show non-secret fields\n"
-        "  copy QUERY [--field NAME]   Copy a field for 10 seconds\n"
+        "  copy QUERY [--field NAME]   Copy a field for the configured TTL\n"
         "  pick [--copy] [--rofi]      Keyboard-driven picker\n"
         "  generate [--length N]       Generate and copy a password\n"
         "  passwd [--recovery FILE]    Change the master password\n"
         "  recovery rotate --out PATH Rotate the recovery key\n"
         "  backup --output PATH        Create an encrypted backup\n"
         "  restore BACKUP              Authenticate and restore a backup\n"
+        "  rescue inspect SNAPSHOT     Inspect unauthenticated metadata\n"
+        "  rescue verify SNAPSHOT      Authenticate a snapshot read-only\n"
+        "  rescue recover SNAPSHOT --output PATH\n"
+        "                              Create an authenticated recovery copy\n"
+        "  rollback SNAPSHOT --output PATH\n"
+        "                              Create a separate rollback copy\n"
         "  doctor                      Validate structure and authentication\n"
         "  shell                       Open a five-minute session\n"
     );
+}
+
+static bool print_command_usage(
+    FILE *const stream,
+    const char *const command,
+    const char *const topic
+)
+{
+    const char *usage = NULL;
+
+    if (strcmp(command, "init") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] init --recovery-out PATH\n";
+    } else if (strcmp(command, "add") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] add\n";
+    } else if (strcmp(command, "edit") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] edit QUERY\n";
+    } else if (strcmp(command, "remove") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] remove QUERY\n";
+    } else if (strcmp(command, "list") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] list [QUERY]\n";
+    } else if (strcmp(command, "show") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] show QUERY\n";
+    } else if (strcmp(command, "copy") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] copy QUERY [--field NAME] [--ttl SECONDS]\n";
+    } else if (strcmp(command, "pick") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] pick [--copy] [--rofi]\n";
+    } else if (strcmp(command, "generate") == 0 && topic == NULL) {
+        usage = "Usage: pvault generate [--length N]\n";
+    } else if (strcmp(command, "passwd") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] passwd [--recovery FILE]\n";
+    } else if (strcmp(command, "recovery") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] recovery rotate --out PATH\n";
+    } else if (strcmp(command, "recovery") == 0 && topic != NULL &&
+        strcmp(topic, "rotate") == 0) {
+        usage = "Usage: pvault [--vault PATH] recovery rotate --out PATH\n";
+    } else if (strcmp(command, "backup") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] backup --output PATH\n";
+    } else if (strcmp(command, "restore") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] restore BACKUP\n";
+    } else if (strcmp(command, "doctor") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] doctor\n";
+    } else if (strcmp(command, "shell") == 0 && topic == NULL) {
+        usage = "Usage: pvault [--vault PATH] shell\n";
+    } else if (strcmp(command, "rescue") == 0 && topic == NULL) {
+        usage =
+            "Usage: pvault rescue inspect SNAPSHOT\n"
+            "       pvault rescue verify SNAPSHOT [--recovery FILE]\n"
+            "       pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]\n";
+    } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
+        strcmp(topic, "inspect") == 0) {
+        usage = "Usage: pvault rescue inspect SNAPSHOT\n";
+    } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
+        strcmp(topic, "verify") == 0) {
+        usage = "Usage: pvault rescue verify SNAPSHOT [--recovery FILE]\n";
+    } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
+        strcmp(topic, "recover") == 0) {
+        usage = "Usage: pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]\n";
+    } else if (strcmp(command, "rollback") == 0 && topic == NULL) {
+        usage = "Usage: pvault rollback SNAPSHOT --output PATH [--recovery FILE]\n";
+    }
+    if (usage == NULL) {
+        return false;
+    }
+    (void)fputs(usage, stream);
+    return true;
 }
 
 static pv_status open_password_vault(
@@ -416,10 +487,13 @@ static pv_status command_init(pv_cli_context *const context, const int argc, cha
         if (strcmp(argv[i], "--recovery-out") == 0 && i + 1 < argc) {
             recovery_out = argv[++i];
         } else if (strcmp(argv[i], "--vault") == 0 && i + 1 < argc) {
-            if (strlen(argv[++i]) >= sizeof(context->config.vault_path) || argv[i][0] != '/') {
+            const char *const vault_path = argv[++i];
+            const size_t vault_path_len = strlen(vault_path);
+
+            if (vault_path_len >= sizeof(context->config.vault_path) || vault_path[0] != '/') {
                 return PV_ERR_USAGE;
             }
-            (void)strcpy(context->config.vault_path, argv[i]);
+            (void)memcpy(context->config.vault_path, vault_path, vault_path_len + 1U);
         } else {
             return PV_ERR_USAGE;
         }
@@ -472,7 +546,10 @@ static pv_status command_init(pv_cli_context *const context, const int argc, cha
         }
     }
     if (status == PV_OK) {
-        (void)printf("Vault created at %s\nRecovery key written to %s\n", context->config.vault_path, recovery_out);
+        (void)printf(
+            "Vault created at the requested vault path.\n"
+            "Recovery key written to the requested recovery output path.\n"
+        );
         status = commit_status;
     }
     pv_model_destroy(&vault);
@@ -1121,15 +1198,13 @@ static pv_status command_recovery_rotate(pv_cli_context *const context, const ch
     if (output_created && status_committed(status)) {
         if (status == PV_OK) {
             (void)printf(
-                "Recovery key rotated; new key written to %s\n"
-                "Move it to separate offline storage. The previous key is now invalid.\n",
-                output
+                "Recovery key rotated; new key written to the requested output path.\n"
+                "Move it to separate offline storage. The previous key is now invalid.\n"
             );
         } else {
             (void)printf(
-                "Recovery update reached the vault; new key written to %s\n"
-                "Keep both old and new recovery keys until both paths are verified.\n",
-                output
+                "Recovery update reached the vault; new key written to the requested output path.\n"
+                "Keep both old and new recovery keys until both paths are verified.\n"
             );
         }
     }
@@ -1148,7 +1223,9 @@ static pv_status command_backup(pv_cli_context *const context, const char *const
     if (status == PV_OK) {
         status = pv_store_backup(context->config.vault_path, output, vault.source_hash);
     }
-    if (status == PV_OK) (void)printf("Encrypted backup written to %s\n", output);
+    if (status == PV_OK) {
+        (void)printf("Encrypted backup written to the requested output path.\n");
+    }
     if (vault.arena.base != NULL) pv_model_destroy(&vault);
     sodium_memzero(&header, sizeof(header));
     return status;
@@ -1180,12 +1257,240 @@ static pv_status command_restore(pv_cli_context *const context, const char *cons
         status = pv_store_restore(context->config.vault_path, backup, verification.source_hash);
     }
     if (!cancelled && status_committed(status)) {
-        (void)printf("Vault restored from %s\n", backup);
+        (void)printf("Vault restored from the authenticated backup.\n");
     }
     pv_buffer_secure_free(&password);
     if (verification.arena.base != NULL) pv_model_destroy(&verification);
     sodium_memzero(&header, sizeof(header));
     return status;
+}
+
+static void print_snapshot_identity(
+    const pv_file_header *const header,
+    const pv_vault *const vault
+)
+{
+    char vault_id[PV_VAULT_ID_BYTES * 2U + 1U];
+    char hash[crypto_generichash_BYTES * 2U + 1U];
+
+    pv_hex_encode(header->vault_id, PV_VAULT_ID_BYTES, vault_id, sizeof(vault_id));
+    pv_hex_encode(vault->source_hash, sizeof(vault->source_hash), hash, sizeof(hash));
+    (void)printf(
+        "Authenticated snapshot\n"
+        "Format: %u.%u\n"
+        "Vault ID: %s\n"
+        "Generation: %llu\n"
+        "Record count: %zu\n"
+        "Snapshot hash (BLAKE2b-256): %s\n",
+        (unsigned)header->major,
+        (unsigned)header->minor,
+        vault_id,
+        (unsigned long long)vault->generation,
+        vault->record_count,
+        hash
+    );
+}
+
+static pv_status command_rescue_inspect(const char *const snapshot)
+{
+    pv_file_header header = { 0 };
+    size_t ciphertext_len = 0U;
+    char vault_id[PV_VAULT_ID_BYTES * 2U + 1U];
+    pv_status status;
+
+    status = pv_store_inspect(snapshot, &header, &ciphertext_len);
+    if (status == PV_OK) {
+        pv_hex_encode(header.vault_id, sizeof(header.vault_id), vault_id, sizeof(vault_id));
+        (void)printf(
+            "UNAUTHENTICATED snapshot metadata\n"
+            "Do not use these values for recovery decisions until the snapshot is verified.\n"
+            "Format (UNAUTHENTICATED): %u.%u\n"
+            "Vault ID (UNAUTHENTICATED): %s\n"
+            "Ciphertext bytes (UNAUTHENTICATED): %zu\n",
+            (unsigned)header.major,
+            (unsigned)header.minor,
+            vault_id,
+            ciphertext_len
+        );
+    }
+    sodium_memzero(&header, sizeof(header));
+    return status;
+}
+
+static pv_status open_authenticated_snapshot(
+    const char *const snapshot,
+    const char *const recovery_file,
+    pv_vault *const vault,
+    pv_file_header *const header
+)
+{
+    pv_file_header inspected_header = { 0 };
+    size_t ciphertext_len = 0U;
+    pv_buffer password = { 0 };
+    pv_buffer encoded_recovery = { 0 };
+    pv_buffer recovery_key = { 0 };
+    pv_status status;
+
+    status = pv_store_inspect(snapshot, &inspected_header, &ciphertext_len);
+    if (status == PV_OK && recovery_file == NULL) {
+        status = pv_secure_read_secret("Master password for snapshot: ", &password, false);
+        if (status == PV_OK) {
+            status = pv_store_open_password(
+                snapshot,
+                password.data,
+                password.len,
+                vault,
+                header
+            );
+        }
+    } else if (status == PV_OK) {
+        status = pv_secure_buffer_alloc(&encoded_recovery, PV_RECOVERY_TEXT_MAX);
+        if (status == PV_OK) {
+            status = pv_secure_buffer_alloc(&recovery_key, PV_RECOVERY_KEY_BYTES);
+        }
+        if (status == PV_OK) {
+            status = pv_recovery_read_file(
+                recovery_file,
+                (char *)encoded_recovery.data,
+                encoded_recovery.len
+            );
+        }
+        if (status == PV_OK) {
+            status = pv_recovery_decode(
+                (const char *)encoded_recovery.data,
+                inspected_header.vault_id,
+                recovery_key.data
+            );
+        }
+        if (status == PV_OK) {
+            status = pv_store_open_recovery(snapshot, recovery_key.data, vault, header);
+        }
+    }
+    pv_buffer_secure_free(&password);
+    pv_buffer_secure_free(&encoded_recovery);
+    pv_buffer_secure_free(&recovery_key);
+    sodium_memzero(&inspected_header, sizeof(inspected_header));
+    return status;
+}
+
+static pv_status command_rescue_verify(
+    const char *const snapshot,
+    const char *const recovery_file
+)
+{
+    pv_vault vault = { 0 };
+    pv_file_header header = { 0 };
+    pv_status status;
+
+    status = open_authenticated_snapshot(snapshot, recovery_file, &vault, &header);
+    if (status == PV_OK) {
+        print_snapshot_identity(&header, &vault);
+    }
+    if (vault.arena.base != NULL) {
+        pv_model_destroy(&vault);
+    }
+    sodium_memzero(&header, sizeof(header));
+    return status;
+}
+
+static pv_status command_rescue_copy(
+    const char *const snapshot,
+    const char *const output,
+    const char *const recovery_file,
+    const bool rollback
+)
+{
+    pv_vault vault = { 0 };
+    pv_file_header header = { 0 };
+    pv_status status;
+
+    status = open_authenticated_snapshot(snapshot, recovery_file, &vault, &header);
+    if (status == PV_OK) {
+        status = pv_store_recover_authenticated(snapshot, output, vault.source_hash);
+    }
+    if (status == PV_OK) {
+        (void)printf(
+            rollback
+                ? "Authenticated rollback copy written in mode 0400.\n"
+                  "The requested output path contains the byte-exact encrypted copy.\n"
+                  "The active vault and source snapshot were left unchanged.\n"
+                : "Authenticated recovery copy written in mode 0400.\n"
+                  "The requested output path contains the byte-exact encrypted copy.\n"
+                  "The active vault and source snapshot were left unchanged.\n"
+        );
+    } else if (status == PV_ERR_DURABILITY) {
+        (void)fprintf(
+            stderr,
+            "%s copy publication may have occurred, but the requested output is not verified.\n"
+            "The active vault and source snapshot were left unchanged.\n"
+            "Verify the requested output path with rescue verify before using this copy.\n",
+            rollback ? "Rollback" : "Recovery"
+        );
+    }
+    if (vault.arena.base != NULL) {
+        pv_model_destroy(&vault);
+    }
+    sodium_memzero(&header, sizeof(header));
+    return status;
+}
+
+static pv_status parse_rescue_command(const int argc, char **const argv)
+{
+    const char *recovery_file = NULL;
+    const char *output = NULL;
+    int i;
+
+    if (argc == 2 && strcmp(argv[0], "inspect") == 0) {
+        return command_rescue_inspect(argv[1]);
+    }
+    if (argc >= 2 && strcmp(argv[0], "verify") == 0) {
+        for (i = 2; i < argc; ++i) {
+            if (strcmp(argv[i], "--recovery") == 0 && recovery_file == NULL && i + 1 < argc) {
+                recovery_file = argv[++i];
+            } else {
+                return PV_ERR_USAGE;
+            }
+        }
+        return command_rescue_verify(argv[1], recovery_file);
+    }
+    if (argc >= 2 && strcmp(argv[0], "recover") == 0) {
+        for (i = 2; i < argc; ++i) {
+            if (strcmp(argv[i], "--output") == 0 && output == NULL && i + 1 < argc) {
+                output = argv[++i];
+            } else if (strcmp(argv[i], "--recovery") == 0 && recovery_file == NULL && i + 1 < argc) {
+                recovery_file = argv[++i];
+            } else {
+                return PV_ERR_USAGE;
+            }
+        }
+        return output == NULL
+            ? PV_ERR_USAGE
+            : command_rescue_copy(argv[1], output, recovery_file, false);
+    }
+    return PV_ERR_USAGE;
+}
+
+static pv_status parse_rollback_command(const int argc, char **const argv)
+{
+    const char *recovery_file = NULL;
+    const char *output = NULL;
+    int i;
+
+    if (argc < 1) {
+        return PV_ERR_USAGE;
+    }
+    for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--output") == 0 && output == NULL && i + 1 < argc) {
+            output = argv[++i];
+        } else if (strcmp(argv[i], "--recovery") == 0 && recovery_file == NULL && i + 1 < argc) {
+            recovery_file = argv[++i];
+        } else {
+            return PV_ERR_USAGE;
+        }
+    }
+    return output == NULL
+        ? PV_ERR_USAGE
+        : command_rescue_copy(argv[0], output, recovery_file, true);
 }
 
 static pv_status command_doctor(pv_cli_context *const context)
@@ -1215,8 +1520,10 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
     ++argv;
     --argc;
     if (argc >= 2 && strcmp(argv[0], "--vault") == 0) {
-        if (argv[1][0] != '/' || strlen(argv[1]) >= sizeof(context->config.vault_path)) return PV_ERR_USAGE;
-        (void)strcpy(context->config.vault_path, argv[1]);
+        const size_t vault_path_len = strlen(argv[1]);
+
+        if (argv[1][0] != '/' || vault_path_len >= sizeof(context->config.vault_path)) return PV_ERR_USAGE;
+        (void)memcpy(context->config.vault_path, argv[1], vault_path_len + 1U);
         argv += 2;
         argc -= 2;
     }
@@ -1224,12 +1531,31 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
     command = argv[0];
     ++argv;
     --argc;
-    if (strcmp(command, "-h") == 0 || strcmp(command, "--help") == 0 ||
-        strcmp(command, "help") == 0) {
+    if (strcmp(command, "-h") == 0 || strcmp(command, "--help") == 0) {
+        if (argc != 0) {
+            return PV_ERR_USAGE;
+        }
         print_usage(stdout);
         return PV_OK;
     }
+    if (strcmp(command, "help") == 0) {
+        if (argc == 0) {
+            print_usage(stdout);
+            return PV_OK;
+        }
+        if (argc <= 2 && print_command_usage(
+                stdout,
+                argv[0],
+                argc == 2 ? argv[1] : NULL
+            )) {
+            return PV_OK;
+        }
+        return PV_ERR_USAGE;
+    }
     if (strcmp(command, "--version") == 0) {
+        if (argc != 0) {
+            return PV_ERR_USAGE;
+        }
         (void)printf(
             "pvault %d.%d.%d-%s\n",
             PVAULT_VERSION_MAJOR,
@@ -1238,6 +1564,13 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
             PVAULT_VERSION_MATURITY
         );
         return PV_OK;
+    }
+    if (argc == 1 && strcmp(argv[0], "--help") == 0) {
+        return print_command_usage(stdout, command, NULL) ? PV_OK : PV_ERR_USAGE;
+    }
+    if ((strcmp(command, "rescue") == 0 || strcmp(command, "recovery") == 0) &&
+        argc == 2 && strcmp(argv[1], "--help") == 0) {
+        return print_command_usage(stdout, command, argv[0]) ? PV_OK : PV_ERR_USAGE;
     }
     if (strcmp(command, "init") == 0) return command_init(context, argc, argv);
     if (strcmp(command, "add") == 0 && argc == 0) return command_add(context);
@@ -1299,6 +1632,8 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
         return command_backup(context, argv[1]);
     }
     if (strcmp(command, "restore") == 0 && argc == 1) return command_restore(context, argv[0]);
+    if (strcmp(command, "rescue") == 0) return parse_rescue_command(argc, argv);
+    if (strcmp(command, "rollback") == 0) return parse_rollback_command(argc, argv);
     print_usage(stderr);
     return PV_ERR_USAGE;
 }
