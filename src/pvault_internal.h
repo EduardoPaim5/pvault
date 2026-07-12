@@ -235,6 +235,16 @@ pv_status pv_store_backup(
     const char *output_path,
     const uint8_t expected_hash[crypto_generichash_BYTES]
 );
+pv_status pv_store_inspect(
+    const char *path,
+    pv_file_header *header,
+    size_t *ciphertext_len
+);
+pv_status pv_store_recover_authenticated(
+    const char *snapshot_path,
+    const char *output_path,
+    const uint8_t expected_hash[crypto_generichash_BYTES]
+);
 pv_status pv_store_restore(
     const char *vault_path,
     const char *backup_path,
@@ -266,6 +276,7 @@ typedef enum pv_store_fault_point {
     PV_STORE_FAULT_POINT_SNAPSHOT_WRITE,
     PV_STORE_FAULT_POINT_SNAPSHOT_FSYNC,
     PV_STORE_FAULT_POINT_SNAPSHOT_PARENT_FSYNC,
+    PV_STORE_FAULT_POINT_SNAPSHOT_READBACK,
     PV_STORE_FAULT_POINT_COPY_DEST_OPEN,
     PV_STORE_FAULT_POINT_COPY_WRITE,
     PV_STORE_FAULT_POINT_COPY_FSYNC,
