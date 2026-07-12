@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -23,21 +24,28 @@ jobs:
     timeout-minutes: 30
     container:
       image: archlinux:base-devel
-      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+      options: --init --ulimit core=0:0 --ulimit memlock=8388608:8388608
     strategy:
       fail-fast: false
       matrix:
         profile: [gcc, clang, sanitize, release]
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
       - name: Install build dependencies
         run: >-
           pacman -Syu --noconfirm --needed
           cmake ninja pkgconf libsodium libcbor ncurses xclip
           gcc clang git python
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Trust and verify Git checkout
+        run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse --is-inside-work-tree)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
       - name: Build and test
         run: ./scripts/ci-build.sh "${{ matrix.profile }}"
 
@@ -47,17 +55,24 @@ jobs:
     timeout-minutes: 20
     container:
       image: archlinux:base-devel
-      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+      options: --init --ulimit core=0:0 --ulimit memlock=8388608:8388608
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
       - name: Install fuzz dependencies
         run: >-
           pacman -Syu --noconfirm --needed
           cmake ninja pkgconf libsodium libcbor ncurses xclip
           clang git python
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Trust and verify Git checkout
+        run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse --is-inside-work-tree)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
       - name: Run bounded fuzz smoke
         env:
           PVAULT_FUZZ_RUNS: '2000'
@@ -69,18 +84,25 @@ jobs:
     timeout-minutes: 20
     container:
       image: archlinux:base-devel
-      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+      options: --init --ulimit core=0:0 --ulimit memlock=8388608:8388608
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
       - name: Install X11 test dependencies
         run: >-
           pacman -Syu --noconfirm --needed
           cmake ninja pkgconf libsodium libcbor ncurses
           xclip libx11 xorg-server-xvfb xorg-xauth
           gcc git python
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Trust and verify Git checkout
+        run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse --is-inside-work-tree)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
       - name: Exercise the real X11 clipboard owner
         run: ./scripts/test-real-x11.sh
 
@@ -90,17 +112,24 @@ jobs:
     timeout-minutes: 30
     container:
       image: archlinux:base-devel
-      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+      options: --init --ulimit core=0:0 --ulimit memlock=8388608:8388608
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
       - name: Install release dependencies
         run: >-
           pacman -Syu --noconfirm --needed
           cmake ninja pkgconf libsodium libcbor ncurses xclip
           gcc git python
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Trust and verify Git checkout
+        run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse --is-inside-work-tree)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
       - name: Check publication boundary
         run: ./scripts/check-publication.sh
       - name: Compare two independent builds
