@@ -148,6 +148,8 @@ int main(void)
     pv_test_compat_suite();
     pv_test_recovery_suite();
     pv_test_store_suite();
+    pv_test_store_security_suite();
+    pv_test_backup_retention_suite();
 #ifdef PVAULT_TEST_FAULT_INJECTION
     pv_test_store_fault_suite();
 #endif

@@ -153,8 +153,10 @@ if(BUILD_TESTING)
         tests/test_compat.c
         tests/test_crypto.c
         tests/test_recovery.c
+        tests/test_backup_retention.c
         tests/test_store.c
         tests/test_store_faults.c
+        tests/test_store_security.c
     )
     target_include_directories(pvault_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(pvault_tests PRIVATE pvault_core_test)
