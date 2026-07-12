@@ -123,15 +123,40 @@ power loss, and kernel failure cannot run application cleanup code.
 ### Filesystem updates and recovery
 
 The data and backup directories are private to the user; files are created mode
-`0600` under a `077` umask. Writers serialize through a stable lockfile. An
-update is written to a new file in the same directory, synchronized, renamed
-atomically, and followed by a directory synchronization. The current vault is
-never opened with `O_TRUNC`.
+`0600` under a `077` umask. Writers serialize through a stable lockfile opened
+relative to a held immediate-parent directory descriptor. The lock, active
+entry, temporary file, automatic backup directory, commit, and readback remain
+confined to that descriptor. An update is written to a new file in the same
+directory, synchronized, renamed atomically, and followed by a directory
+synchronization. `init` and backup publication use no-replace renames. The
+current vault is never opened with `O_TRUNC`.
+
+Snapshot reads validate the opened descriptor rather than trusting path metadata:
+the immediate parent must be current-user-owned and not group/world-writable,
+and the file must be regular, current-user-owned, single-linked, and exactly
+0400 or 0600. `O_NOFOLLOW` applies to the immediate-parent entry and the final
+snapshot entry; intermediate pathname components are not claimed to be
+symlink-free. Nonblocking descriptor opens avoid blocking on a substituted
+special file. The parent pathname is revalidated around publication so movement
+is reported, while the held descriptor prevents redirecting the commit to a
+replacement directory. These checks do not defend against root, an untrusted
+ancestor that can hide or move directories, or another process already
+controlling the same Unix account.
 
 Previous encrypted snapshots are retained according to the configured backup
-limit. Restore authenticates a candidate before replacement and first preserves
-the current state. These rules reduce, but cannot eliminate, filesystem,
-hardware, and operator failure.
+limit. Automatic retention is isolated by vault ID and numeric generation,
+never targets manual, legacy, pre-restore, or pre-migration names, and occurs
+only after the new active snapshot is committed and verified. Each managed
+candidate must pass descriptor metadata checks, AEAD authentication, CBOR
+validation, and an internal-generation/name match. Mode-0400 automatic entries
+are pinned outside retention. A suspicious entry aborts pruning; retaining
+excess ciphertext is the conservative failure mode. Backup publication is
+temporary-file-first and atomic no-replace, so a killed writer does not publish
+a partial deterministic name. Restore authenticates a candidate before
+replacement, refuses to overwrite an unrelated non-PVault file or a different
+vault lineage, and first preserves the well-framed current snapshot. These rules
+reduce, but cannot eliminate,
+filesystem, hardware, rollback, and operator failure.
 
 The recovery file is not a backup of the vault. It is an alternate secret that
 unlocks a surviving encrypted snapshot. Users must keep both encrypted backups

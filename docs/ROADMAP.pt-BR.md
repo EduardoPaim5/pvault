@@ -46,7 +46,14 @@ Infraestrutura entregue neste marco:
 - comparação automatizada de duas árvores de instalação Release independentes;
 - procedimento documentado de release, assinatura, checksums e reprodução;
 - contrato documentado (ainda não implementação) para tratamento fail-closed,
-  congelamento do v1.0, futura migração transacional, rollback e rescue.
+  congelamento do v1.0, futura migração transacional, rollback e rescue;
+- abertura de snapshots via descritor validado, rejeição de symlink/hardlink e
+  permissões inseguras;
+- transações confinadas a um `dirfd` estável, publicação `no-replace` em `init`
+  e backups, readback pós-commit e recusa de sobrescrever arquivo não-PVault em
+  `restore`, incluindo recusa de troca implícita entre linhagens de cofre;
+- retenção automática isolada por cofre, com AEAD/CBOR e geração autenticada,
+  pinning 0400 e falha conservadora antes de qualquer poda suspeita.
 
 Permanecem como gates da fase:
 

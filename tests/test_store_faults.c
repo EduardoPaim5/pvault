@@ -586,9 +586,24 @@ static void store_faults_public_backup_removes_partial_snapshot(void)
         hits = pv_store_test_fault_point_hit_count(cases[index].point);
         pv_store_test_fault_reset();
 
-        PV_CHECK_STATUS(status, PV_ERR_IO);
+        PV_CHECK_STATUS(
+            status,
+            cases[index].point == PV_STORE_FAULT_POINT_SNAPSHOT_PARENT_FSYNC
+                ? PV_ERR_DURABILITY
+                : PV_ERR_IO
+        );
         PV_CHECK(hits == 1U);
-        PV_CHECK(access(output, F_OK) != 0);
+        if (cases[index].point == PV_STORE_FAULT_POINT_SNAPSHOT_PARENT_FSYNC) {
+            PV_CHECK(access(output, F_OK) == 0);
+            PV_CHECK(fault_snapshot_is_authentic(
+                output,
+                recovery_key,
+                baseline_hash,
+                0U
+            ));
+        } else {
+            PV_CHECK(access(output, F_OK) != 0);
+        }
         PV_CHECK(fault_snapshot_is_authentic(path, recovery_key, baseline_hash, 0U));
     }
 
@@ -637,7 +652,13 @@ static void store_faults_restore_preserves_active_snapshot(void)
         "backups"
     ));
     if (!fault_create_baseline(active_path, recovery_key, &active, &active_header) ||
-        !fault_create_baseline(source_path, recovery_key, &source, &source_header)) {
+        pv_store_backup(active_path, source_path, active.source_hash) != PV_OK ||
+        pv_store_open_recovery(
+            source_path,
+            recovery_key,
+            &source,
+            &source_header
+        ) != PV_OK) {
         pv_model_destroy(&active);
         pv_model_destroy(&source);
         sodium_memzero(recovery_key, sizeof recovery_key);
@@ -675,7 +696,16 @@ static void store_faults_restore_preserves_active_snapshot(void)
 
         PV_CHECK_STATUS(status, PV_ERR_IO);
         PV_CHECK(hits == 1U);
-        PV_CHECK(after == before);
+        if (copy_cases[index].point == PV_STORE_FAULT_POINT_COPY_PARENT_FSYNC) {
+            PV_CHECK(before != SIZE_MAX && after == before + 1U);
+            PV_CHECK(fault_directory_has_snapshot_hash(
+                backup_directory,
+                "pre-restore-",
+                active_hash
+            ));
+        } else {
+            PV_CHECK(after == before);
+        }
         PV_CHECK(fault_snapshot_is_authentic(active_path, recovery_key, active_hash, 0U));
     }
 

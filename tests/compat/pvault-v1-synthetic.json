@@ -29,7 +29,7 @@
     "file": "docs/FORMAT.md",
     "major": 1,
     "minor": 0,
-    "sha256": "25dcbdd810fda036885650e4d6ea6d80ca3ab04c0cad43437f43bf78ae1a56c8"
+    "sha256": "9689b9e0da56194f2e54c855b2bddc3bc1f05883992b185d74118f16ffd08a59"
   },
   "implementation": {
     "file": "tests/compat/pvault_v1_vector.py",

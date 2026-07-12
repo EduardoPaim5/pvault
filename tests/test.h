@@ -28,7 +28,9 @@ void pv_test_crypto_suite(void);
 void pv_test_cbor_suite(void);
 void pv_test_compat_suite(void);
 void pv_test_recovery_suite(void);
+void pv_test_backup_retention_suite(void);
 void pv_test_store_suite(void);
+void pv_test_store_security_suite(void);
 #ifdef PVAULT_TEST_FAULT_INJECTION
 void pv_test_store_fault_suite(void);
 #endif
