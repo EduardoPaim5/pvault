@@ -78,11 +78,13 @@ Copy the current encrypted vault snapshot to PATH.
 Authenticate an encrypted backup before replacing the active vault. The current
 vault is backed up before replacement. Restore rolls back the complete snapshot,
 including password and recovery keyslots; historical credentials may become
-active again.
+active again. An existing active vault must have the same vault ID as the
+backup; cross-vault replacement is rejected. The active ID is read from its
+cleartext header and does not authenticate a damaged active body.
 .TP
 .B doctor
-Check file structure, authentication, parent/lock permissions, and payload
-validity without displaying record content.
+Check file framing and parent, snapshot, and lock metadata without displaying
+record content. This command does not authenticate or decrypt the body.
 .TP
 .B shell
 Open an interactive session. The decrypted vault stays only in the current
@@ -129,6 +131,19 @@ PVault does not chmod an existing parent directory. The immediate parent of a
 vault, backup, or recovery destination must be owned by the current user and
 must not be group/world-writable.
 .PP
+Vault writes hold that immediate-parent directory open from lock acquisition
+through commit and readback, address transaction entries relative to it, and
+recheck the configured pathname around publication. This confines directory
+replacement races but does not make an untrusted ancestor safe.
+.PP
+Vaults and encrypted snapshots read by PVault must be regular non-symlink files
+owned by the current user, with one hard link and mode 0400 or 0600. PVault
+creates them as 0600. A 0400 snapshot can be opened, backed up, and restored,
+but cannot be saved in place. A 0400 automatic snapshot is pinned outside
+retention. Copy a snapshot from media without reliable POSIX ownership,
+link-count, and mode semantics into a private local directory before using
+.BR restore .
+.PP
 For a custom vault path, automatic snapshots are stored in a literal
 .I backups/
 directory beside the vault. For example,
@@ -139,6 +154,15 @@ PVault rejects a symlink or foreign-owned backup directory and may set an
 existing owner-owned backup directory to mode 0700. Use a dedicated vault
 parent to avoid colliding with an unrelated directory named
 .IR backups .
+.PP
+Automatic names encode the vault ID and source generation as
+.IR auto-v1-<vault-id>-g<generation>.pvlt .
+Retention is per vault and runs after a verified commit. Manual, legacy,
+pre-restore, pre-migration, other-vault, future-generation, malformed, and
+unsafe entries are preserved. A suspicious managed entry stops that pruning
+pass rather than risking deletion. Managed candidates are AEAD-authenticated,
+CBOR-parsed, and required to carry the generation encoded in their filename
+before deletion. Backup names are published atomically without replacement.
 .SH CLIPBOARD
 On X11, PVault uses
 .B xclip

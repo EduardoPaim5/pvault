@@ -177,7 +177,11 @@ key itself is never accepted through `argv`.
 
 Restore replaces the complete encrypted snapshot, including its password and
 recovery keyslots. Keep historical credentials until the restored vault has
-been authenticated and a fresh recovery key has been stored offline.
+been authenticated and a fresh recovery key has been stored offline. If an
+active vault exists, its vault ID must match the authenticated backup;
+cross-vault replacement requires a future explicit import workflow. The active
+ID is the declared cleartext header value, so this lineage guard does not prove
+that a damaged active snapshot can still authenticate.
 
 ### i3 example
 
@@ -238,7 +242,37 @@ unrelated directory already named `backups`.
 PVault never changes permissions on an existing parent such as `$HOME` or a
 project directory. The vault's immediate parent must be owned by the current
 user and must not be group/world-writable; create a dedicated mode-0700
-directory or correct it explicitly if an operation reports an I/O error.
+directory or correct it explicitly if an operation reports an I/O error. A
+write transaction holds that immediate-parent directory descriptor from lock
+acquisition through commit and readback, addresses the lock, temporary file,
+vault, and automatic backups relative to it, and rechecks the configured
+pathname before and after publication. This confines a moved-parent race to the
+opened directory, but it does not make an otherwise untrusted ancestor or a
+compromised Unix account safe.
+
+Every vault or encrypted snapshot consumed by PVault must be a regular,
+non-symlink file owned by the current user, with exactly one hard link and mode
+`0400` or `0600`. PVault-created files remain `0600`; `0400` permits a deliberate
+read-only backup. A `0400` snapshot can be opened, copied, and restored, but
+cannot be saved in place. An automatic backup changed to `0400` is pinned and
+excluded from retention; a normally managed automatic backup remains `0600`.
+A snapshot copied from FAT/exFAT, a foreign-owned mount, or other storage
+without trustworthy POSIX ownership/link/mode semantics must first be copied
+into a private local directory and set to `0600` before restore.
+
+Automatic backups use
+`auto-v1-<32-lowercase-vault-id>-g<20-digit-generation>.pvlt`. Retention is
+numeric, per vault ID, and runs only after the replacement snapshot has been
+committed and verified. Before an entry becomes eligible, PVault authenticates
+its AEAD body, parses its CBOR payload, and requires the internal generation to
+match the filename. It never removes pinned `0400` snapshots, manual or legacy names,
+`pre-restore-*`, `pre-migrate-*`, another vault's files, future generations, or
+near-matches. A suspicious managed-name entry stops that pruning pass and is
+left untouched; excess encrypted backups are safer than deleting an uncertain
+file. New automatic and manual backups are first written and synchronized under
+a private temporary name, then published atomically without replacing an
+existing entry; a crash cannot leave a partial deterministic backup name that
+blocks every retry.
 
 If `init` commits the vault but cannot create the requested recovery file, it
 keeps the empty vault instead of deleting a possibly durable commit. Use the

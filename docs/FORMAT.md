@@ -378,7 +378,10 @@ cryptographic validity check.
 
 A reader follows this order to prevent unauthenticated work and plaintext use:
 
-1. Open a regular file without following an attacker-controlled replacement.
+1. Open and hold a validated immediate-parent directory descriptor, then open
+   the final snapshot entry relative to it with `O_NOFOLLOW`; require a
+   current-user regular file with one hard link and mode 0400 or 0600. No claim
+   is made that intermediate pathname components are symlink-free.
 2. Validate file size and read exactly 252 header bytes.
 3. Decode fixed fields and validate magic, versions, flags, IDs, algorithm IDs,
    keyslot count, KDF bounds, and body length.
@@ -398,17 +401,52 @@ wrong recovery key, corrupted keyslot, or modified body to the ordinary CLI.
 Atomic replacement and backup retention are storage rules, not additional wire
 fields. A conforming local writer:
 
-1. serializes under an exclusive stable lockfile;
-2. creates a mode-0600 temporary file in the vault directory without following
-   symlinks;
+1. opens the stable lockfile relative to a validated immediate-parent directory
+   descriptor and holds both through commit and readback;
+2. creates a mode-0600 temporary file relative to that same descriptor;
 3. writes and `fsync()`s the complete new snapshot;
 4. preserves the previous encrypted snapshot as a backup;
 5. atomically renames the new snapshot over the active path; and
 6. `fsync()`s the containing directory.
 
+Initial creation MUST publish with no-replace semantics, so an entry created
+after the absence check is never overwritten. Backup publication likewise MUST
+write and synchronize a private temporary file and then atomically publish the
+final name without replacement. The implementation reopens and compares the
+configured parent pathname before and after publication; the held descriptor,
+not this inherently racy comparison, confines all transaction mutations.
+
 A backup is an exact PVault snapshot and uses this same format. Restore MUST
 fully authenticate and parse a candidate before it can replace the current
-file, and it MUST preserve the pre-restore state first.
+file, MUST require the active snapshot's declared cleartext vault ID to equal
+the authenticated candidate ID, and MUST preserve the pre-restore state first.
+This lineage guard does not authenticate the active snapshot. Cross-vault
+import is not an implicit restore operation.
+
+PVault-created snapshots use mode 0600. Readers may also accept 0400 for an
+explicitly read-only copy; group/world access, executable or special mode bits,
+foreign ownership, multiple hard links, non-regular objects, symlinks, and an
+unsafe immediate parent are storage-policy errors before parsing or KDF work.
+An active 0400 snapshot MUST NOT be saved in place. It remains valid input for
+open, backup, and restore. A mode-0400 automatic entry is pinned and excluded
+from retention.
+
+Automatic backup names are exactly
+`auto-v1-<vault-id>-g<generation>.pvlt`, where `vault-id` is 32 lowercase
+hexadecimal characters and `generation` is 20 decimal digits greater than zero.
+The name records the generation of the previous snapshot, not the replacement.
+Retention is numeric and scoped to the authenticated vault ID. It runs only
+after atomic replacement and successful readback, and considers only exact,
+private mode-0600 automatic entries at or below that previous generation. Each
+candidate MUST pass AEAD body authentication, deterministic CBOR validation,
+and equality between the authenticated internal generation and the filename
+generation before any deletion phase begins. Pinned 0400, manual, legacy,
+pre-restore, pre-migration, other-vault, future-generation, and near-match names
+are never pruned. Suspicious metadata, framing, authentication, or generation
+aborts the whole pruning pass before deletion. Deletions are revalidated and
+any pass that removed an entry attempts a backup-directory `fsync()`, including
+after a later deletion failure; pruning failure never rolls back or invalidates
+an already verified update.
 
 ## 11. Compatibility and test vectors
 
