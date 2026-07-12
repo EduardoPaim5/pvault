@@ -145,9 +145,12 @@ if(PVAULT_ENABLE_SANITIZERS)
 endif()
 
 if(BUILD_TESTING)
+    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+
     add_executable(pvault_tests
         tests/test_main.c
         tests/test_cbor.c
+        tests/test_compat.c
         tests/test_crypto.c
         tests/test_recovery.c
         tests/test_store.c
@@ -165,13 +168,33 @@ if(BUILD_TESTING)
         target_link_options(pvault_tests PRIVATE -fsanitize=address,undefined)
     endif()
     add_test(NAME pvault_tests COMMAND pvault_tests)
-    set_tests_properties(pvault_tests PROPERTIES LABELS unit TIMEOUT 180)
+    set_tests_properties(
+        pvault_tests
+        PROPERTIES
+            LABELS unit
+            TIMEOUT 180
+            ENVIRONMENT
+                "PVAULT_V1_VECTOR_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/pvault-v1-synthetic.bin"
+    )
+
+    add_test(
+        NAME pvault_v1_compat_vector
+        COMMAND
+            ${CMAKE_COMMAND} -E env
+            "PYTHONDONTWRITEBYTECODE=1"
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/pvault_v1_vector.py
+            --check
+    )
+    set_tests_properties(
+        pvault_v1_compat_vector
+        PROPERTIES LABELS "unit;compatibility;format" TIMEOUT 120
+    )
 
     if(PVAULT_BUILD_INTEGRATION_TESTS)
         if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
             message(FATAL_ERROR "PVAULT_BUILD_INTEGRATION_TESTS currently requires Linux")
         endif()
-        find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
         add_test(
             NAME pvault_integration_tests
             COMMAND
@@ -293,6 +316,7 @@ install(FILES
     THREAT_MODEL.md
     CONTRIBUTING.md
     docs/FORMAT.md
+    docs/COMPATIBILITY.md
     docs/ARCHITECTURE.pt-BR.md
     docs/ROADMAP.pt-BR.md
     docs/RELEASES.md
