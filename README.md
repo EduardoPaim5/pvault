@@ -167,6 +167,7 @@ pvault rescue inspect SNAPSHOT
 pvault rescue verify SNAPSHOT [--recovery FILE]
 pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]
 pvault rollback SNAPSHOT --output PATH [--recovery FILE]
+pvault config check
 pvault doctor
 pvault shell
 ```
@@ -184,6 +185,13 @@ through the clipboard; it never prints it.
 `--recovery FILE`, it reads the recovery key from FILE and allows a new master
 password to be set without changing the random vault master key. The recovery
 key itself is never accepted through `argv`.
+
+New master passwords use one shared guardrail in both `init` and `passwd`: at
+least 16 bytes, with conspicuously common values, full keyboard/numeric/alphabet
+sequences, and periodic repetitions rejected. This filter is not an entropy
+estimator and cannot make a chosen password strong. Prefer a unique passphrase
+of 5-6 words selected by a cryptographically secure generator and keep it
+separate from the recovery key.
 
 Restore replaces the complete encrypted snapshot, including its password and
 recovery keyslots. Keep historical credentials until the restored vault has
@@ -226,8 +234,20 @@ i3 configuration automatically.
 
 The optional configuration file uses strict `key=value` lines. Blank lines and
 lines whose first non-space character is `#` are ignored; unknown keys, invalid
-values, and relative vault paths are rejected. It is not a place for passwords
-or other secrets.
+values, duplicate keys, embedded NUL bytes, oversized files or lines, and
+relative vault paths are rejected. CRLF and LF line endings are accepted. The
+file is parsed transactionally, so an invalid later line cannot leave earlier
+values partially applied. It is not a place for passwords or other secrets.
+
+When the file exists it must be a regular, non-symlink file owned by the current
+user, have exactly one hard link, and use mode `0600` or `0400`. Its immediate
+parent must also be owned by the current user and must not be group/world
+writable. PVault opens the parent and file by descriptor with `O_NOFOLLOW` and
+validates metadata before reading; FIFOs and device files are rejected without
+interpretation, and `O_NONBLOCK` prevents a FIFO from stalling the process. A
+missing file under an absent or valid immediate parent continues to select the
+built-in defaults; an unsafe existing parent fails closed even when the file is
+absent.
 
 | Key | Accepted value | Default |
 | --- | --- | --- |
@@ -255,6 +275,19 @@ $XDG_DATA_HOME/pvault/vault.pvlt
 $XDG_DATA_HOME/pvault/backups/
 $XDG_CONFIG_HOME/pvault/config
 ```
+
+If you create the optional file manually, use `chmod 600` on it. A mode such as
+`0644` is rejected even though the current keys are not secrets, because the
+configuration controls the selected vault, retention behavior, clipboard TTL,
+and external-picker opt-in.
+If upgrading from an earlier pre-alpha revision that accepted `0644`, run
+`chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/pvault/config"` before the next
+normal command.
+
+Run `pvault config check` to validate either the private file or the built-in
+defaults. The command deliberately loads configuration itself, so it still
+runs when normal commands reject an invalid file. It reports no configured
+paths or values.
 
 If the XDG variables are unset, their standard defaults below `$HOME` are used.
 The recovery file created by `init` must be moved to separate offline storage;

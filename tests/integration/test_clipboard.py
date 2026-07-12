@@ -26,6 +26,11 @@ DRIVER_SOURCE = REPOSITORY / "tests" / "integration" / "clipboard_driver.c"
 FAKE_OWNER_SOURCE = REPOSITORY / "tests" / "integration" / "fake_clipboard_owner.c"
 
 
+def poison_clipboard_child_signal_state() -> None:
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+
 class ClipboardIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -76,6 +81,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
                 str(DRIVER_SOURCE),
                 str(REPOSITORY / "src" / "clipboard.c"),
                 str(REPOSITORY / "src" / "error.c"),
+                str(REPOSITORY / "src" / "util.c"),
                 "-o",
                 str(cls.driver),
             ]
@@ -86,6 +92,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
                 str(REPOSITORY / "src" / "clip_main.c"),
                 str(REPOSITORY / "src" / "clipboard.c"),
                 str(REPOSITORY / "src" / "error.c"),
+                str(REPOSITORY / "src" / "util.c"),
                 "-o",
                 str(cls.helper),
             ]
@@ -200,7 +207,15 @@ class ClipboardIntegrationTests(unittest.TestCase):
                 return int(line.split(maxsplit=1)[1])
         raise AssertionError("driver did not report a supervisor pid")
 
-    def _send_secret(self, backend: str, ttl: int, secret: bytes, *, early_exit: bool = False) -> tuple[Path, int, bytes]:
+    def _send_secret(
+        self,
+        backend: str,
+        ttl: int,
+        secret: bytes,
+        *,
+        early_exit: bool = False,
+        poisoned_signals: bool = False,
+    ) -> tuple[Path, int, bytes]:
         control = self._control(f"{backend}-")
         if early_exit:
             (control / "exit-after-read").touch(mode=0o600)
@@ -223,6 +238,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
             env=environment,
             check=False,
             timeout=10.0,
+            preexec_fn=poison_clipboard_child_signal_state if poisoned_signals else None,
         )
         safe_stdout = completed.stdout.replace(secret, b"<redacted>")
         safe_stderr = completed.stderr.replace(secret, b"<redacted>")
@@ -242,6 +258,36 @@ class ClipboardIntegrationTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(secret).hexdigest(), result["sha256"])
         return control, supervisor, completed.stdout + completed.stderr
 
+    def _send_secret_expect_failure(
+        self,
+        mode: str,
+        result_marker: str,
+    ) -> None:
+        control = self._control(f"failure-{mode}-")
+        (control / mode).touch(mode=0o600)
+        secret = (b"PVAULT-FAIL-CLOSED-" + os.urandom(32)) * 16384
+        completed = subprocess.run(
+            [self.driver, "send", "30"],
+            input=secret,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=REPOSITORY,
+            env=self._environment(control, "x11"),
+            check=False,
+            timeout=10.0,
+        )
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(0, completed.returncode)
+        self.assertNotEqual(-signal.SIGPIPE, completed.returncode)
+        self.assert_secret_absent(secret, output, "failed clipboard diagnostics")
+        supervisor = self._supervisor_from_output(completed.stdout)
+        wait_until(lambda: (control / result_marker).exists(), 3.0, result_marker)
+        owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
+        wait_until(lambda: not pid_exists(owner), 4.0, f"{mode} owner exit")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, f"{mode} supervisor exit")
+        remaining = matching_processes(b"pvault-clip", b"--worker") - self._baseline_workers
+        self.assertEqual(set(), remaining)
+
     def _assert_owner_metadata_is_secret_free(self, control: Path, secret: bytes, backend: str) -> int:
         owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
         supervisor = int((control / "supervisor.pid").read_text(encoding="ascii").strip())
@@ -250,6 +296,8 @@ class ClipboardIntegrationTests(unittest.TestCase):
         self.assertFalse(result["secret_in_cmdline"])
         self.assertFalse(result["secret_in_environment"])
         self.assertFalse(result["forbidden_canary_present"])
+        self.assertFalse(result["sigterm_blocked"])
+        self.assertTrue(result["sigchld_default"])
         self.assertEqual(backend, result["argument_shape"])
         worker_cmdline = process_file(supervisor, "cmdline")
         if worker_cmdline is not None:
@@ -280,6 +328,35 @@ class ClipboardIntegrationTests(unittest.TestCase):
         wait_until(lambda: not pid_exists(owner), 4.0, "Wayland owner timeout")
         wait_until(lambda: not pid_exists(supervisor), 4.0, "Wayland supervisor exit")
 
+    def test_wayland_binary_secret_uses_octet_stream_without_truncation(self) -> None:
+        secret = b"\x00WAYLAND-BINARY-SECRET\xff\x00"
+        control, supervisor, _ = self._send_secret("wayland", 1, secret)
+        owner = self._assert_owner_metadata_is_secret_free(
+            control,
+            secret,
+            "wayland-binary",
+        )
+        wait_until(lambda: not pid_exists(owner), 4.0, "Wayland binary owner timeout")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "Wayland binary supervisor exit")
+
+    def test_wayland_invalid_utf8_without_nul_uses_octet_stream(self) -> None:
+        secret = b"WAYLAND-INVALID-UTF8-\xff-\xfe"
+        control, supervisor, _ = self._send_secret("wayland", 1, secret)
+        owner = self._assert_owner_metadata_is_secret_free(
+            control,
+            secret,
+            "wayland-binary",
+        )
+        wait_until(lambda: not pid_exists(owner), 4.0, "invalid UTF-8 owner timeout")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "invalid UTF-8 supervisor exit")
+
+    def test_wayland_multibyte_utf8_without_nul_remains_text(self) -> None:
+        secret = "senha-✓-🔐".encode("utf-8")
+        control, supervisor, _ = self._send_secret("wayland", 1, secret)
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
+        wait_until(lambda: not pid_exists(owner), 4.0, "UTF-8 text owner timeout")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "UTF-8 text supervisor exit")
+
     def test_owner_exit_early_does_not_spawn_a_clear_operation(self) -> None:
         secret = b"EARLY-EXIT-CLIPBOARD-SECRET"
         started = time.monotonic()
@@ -291,6 +368,15 @@ class ClipboardIntegrationTests(unittest.TestCase):
         self.assertTrue((control / "exited-early").exists())
         self.assertEqual(1, len((control / "invocations.log").read_text().splitlines()))
         self.assertFalse((control / "signal.txt").exists())
+
+    def test_owner_exit_without_reading_fails_closed(self) -> None:
+        self._send_secret_expect_failure("mode-exit-without-read", "exited-without-read")
+
+    def test_owner_exit_after_partial_read_fails_closed(self) -> None:
+        self._send_secret_expect_failure(
+            "mode-exit-after-partial-read",
+            "exited-after-partial-read",
+        )
 
     def test_owner_dies_if_supervisor_is_killed_after_receiving_secret(self) -> None:
         secret = b"SUPERVISOR-DEATH-CLIPBOARD-SECRET"
@@ -308,6 +394,30 @@ class ClipboardIntegrationTests(unittest.TestCase):
         )
         wait_until(lambda: not pid_exists(supervisor), 4.0, "killed supervisor exit")
         wait_until(lambda: not pid_exists(owner), 4.0, "owner parent-death cleanup")
+        self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
+
+    def test_parent_death_after_inherited_signal_state_is_normalized(self) -> None:
+        secret = b"POISONED-SIGNAL-STATE-CLIPBOARD-SECRET"
+        control, supervisor, output = self._send_secret(
+            "x11",
+            30,
+            secret,
+            poisoned_signals=True,
+        )
+        self.assertIn(b"CALLER_SIGCHLD ignored", output)
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "x11")
+        supervisor_starttime = process_starttime(supervisor)
+        self.assertTrue(
+            self._signal_matching_process(
+                supervisor,
+                supervisor_starttime,
+                signal.SIGKILL,
+                b"--worker",
+            ),
+            "refused to signal a supervisor whose identity could not be verified",
+        )
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "poisoned supervisor exit")
+        wait_until(lambda: not pid_exists(owner), 4.0, "poisoned owner parent-death cleanup")
         self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
 
     def test_dead_supervisor_returns_error_without_sigpipe_termination(self) -> None:

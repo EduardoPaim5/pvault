@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sodium.h>
@@ -104,6 +105,22 @@ static int install_signal_handlers(void)
         sigaction(SIGHUP, &action, NULL) == 0 ? 0 : -1;
 }
 
+static bool signal_is_blocked(const int signal_number)
+{
+    sigset_t current;
+
+    if (sigprocmask(SIG_BLOCK, NULL, &current) != 0) return true;
+    return sigismember(&current, signal_number) != 0;
+}
+
+static bool sigchld_is_default(void)
+{
+    struct sigaction action;
+
+    if (sigaction(SIGCHLD, NULL, &action) != 0) return false;
+    return action.sa_handler == SIG_DFL;
+}
+
 static bool contains_secret(
     const void *const haystack,
     const size_t haystack_length,
@@ -180,6 +197,11 @@ static const char *argument_shape(const int argc, char **const argv)
         strcmp(argv[3], "text/plain;charset=utf-8") == 0) {
         return "wayland";
     }
+    if (argc == 4 && strcmp(argv[1], "--foreground") == 0 &&
+        strcmp(argv[2], "--type") == 0 &&
+        strcmp(argv[3], "application/octet-stream") == 0) {
+        return "wayland-binary";
+    }
     return "unexpected";
 }
 
@@ -195,6 +217,10 @@ int main(int argc, char **argv)
     char result_path[PATH_MAX];
     char ready_path[PATH_MAX];
     char early_path[PATH_MAX];
+    char no_read_mode_path[PATH_MAX];
+    char partial_read_mode_path[PATH_MAX];
+    char no_read_result_path[PATH_MAX];
+    char partial_read_result_path[PATH_MAX];
     char text[1024];
     bool in_argv;
     bool in_environment;
@@ -206,6 +232,10 @@ int main(int argc, char **argv)
         make_path(result_path, home, "result.json") != 0 ||
         make_path(ready_path, home, "received.ready") != 0 ||
         make_path(early_path, home, "exit-after-read") != 0 ||
+        make_path(no_read_mode_path, home, "mode-exit-without-read") != 0 ||
+        make_path(partial_read_mode_path, home, "mode-exit-after-partial-read") != 0 ||
+        make_path(no_read_result_path, home, "exited-without-read") != 0 ||
+        make_path(partial_read_result_path, home, "exited-after-partial-read") != 0 ||
         make_path(signal_path, home, "signal.txt") != 0) {
         return 126;
     }
@@ -216,6 +246,23 @@ int main(int argc, char **argv)
     if (sodium_init() < 0 || install_signal_handlers() != 0 || append_invocation(home) != 0) {
         (void)write_file(result_path, "{\"stage\":\"initialization-failed\"}\n");
         return 126;
+    }
+
+    if (access(no_read_mode_path, F_OK) == 0) {
+        (void)write_file(no_read_result_path, "yes\n");
+        return 0;
+    }
+    if (access(partial_read_mode_path, F_OK) == 0) {
+        uint8_t prefix[4096];
+        ssize_t received;
+
+        do {
+            received = read(STDIN_FILENO, prefix, sizeof(prefix));
+        } while (received < 0 && errno == EINTR);
+        sodium_memzero(prefix, sizeof(prefix));
+        if (received <= 0) return 126;
+        (void)write_file(partial_read_result_path, "yes\n");
+        return 0;
     }
 
     secret = sodium_malloc(FAKE_MAX_SECRET);
@@ -246,13 +293,16 @@ int main(int argc, char **argv)
         sizeof(text),
         "{\"argument_shape\":\"%s\",\"forbidden_canary_present\":%s,"
         "\"length\":%zu,\"secret_in_argv\":%s,\"secret_in_cmdline\":%s,"
-        "\"secret_in_environment\":%s,\"sha256\":\"%s\"}\n",
+        "\"secret_in_environment\":%s,\"sigchld_default\":%s,"
+        "\"sigterm_blocked\":%s,\"sha256\":\"%s\"}\n",
         argument_shape(argc, argv),
         forbidden_canary_present() ? "true" : "false",
         used,
         in_argv ? "true" : "false",
         in_cmdline ? "true" : "false",
         in_environment ? "true" : "false",
+        sigchld_is_default() ? "true" : "false",
+        signal_is_blocked(SIGTERM) ? "true" : "false",
         digest_hex
     );
     sodium_memzero(digest_hex, sizeof(digest_hex));
@@ -261,6 +311,9 @@ int main(int argc, char **argv)
 
     if (access(early_path, F_OK) == 0) {
         char exited_path[PATH_MAX];
+        const struct timespec acceptance_window = {.tv_sec = 1, .tv_nsec = 0};
+
+        (void)nanosleep(&acceptance_window, NULL);
         if (make_path(exited_path, home, "exited-early") == 0) {
             (void)write_file(exited_path, "yes\n");
         }

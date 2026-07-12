@@ -1,4 +1,5 @@
 #include "clipboard.h"
+#include "pvault_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -43,10 +44,12 @@
 #endif
 
 enum pv_clip_message {
-    PV_CLIP_MSG_START = 1,
+    PV_CLIP_MSG_START_TEXT = 1,
     PV_CLIP_MSG_READY = 2,
     PV_CLIP_MSG_DONE = 3,
-    PV_CLIP_MSG_FAILED = 4
+    PV_CLIP_MSG_FAILED = 4,
+    PV_CLIP_MSG_ACCEPTED = 5,
+    PV_CLIP_MSG_START_BINARY = 6
 };
 
 enum pv_clip_backend {
@@ -171,6 +174,41 @@ static void harden_clip_process(void)
     (void)setrlimit(RLIMIT_CORE, &no_core);
     (void)prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     (void)umask(077);
+}
+
+static int normalize_child_signal_state(void)
+{
+    static const int reset_signals[] = {SIGTERM, SIGINT, SIGHUP, SIGCHLD};
+    struct sigaction action;
+    sigset_t empty;
+    size_t index;
+
+    if (sigemptyset(&empty) != 0 || sigprocmask(SIG_SETMASK, &empty, NULL) != 0) {
+        return -1;
+    }
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        return -1;
+    }
+    for (index = 0U; index < sizeof(reset_signals) / sizeof(reset_signals[0]); ++index) {
+        if (sigaction(reset_signals[index], &action, NULL) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int set_sigchld_default(struct sigaction *previous)
+{
+    struct sigaction action;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        return -1;
+    }
+    return sigaction(SIGCHLD, &action, previous);
 }
 
 static void stop_handler(int signal_number)
@@ -585,11 +623,17 @@ static int parse_ttl_argument(const char *text, unsigned *result)
 static void owner_exec(enum pv_clip_backend backend,
                        int data_fd,
                        int error_fd,
-                       pid_t expected_parent)
+                       pid_t expected_parent,
+                       bool text_content)
 {
     char *environment[16];
     int saved_errno;
 
+    if (normalize_child_signal_state() != 0) {
+        saved_errno = errno;
+        (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+        _exit(126);
+    }
     harden_clip_process();
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
         saved_errno = errno;
@@ -627,12 +671,13 @@ static void owner_exec(enum pv_clip_backend backend,
         char argument_program[] = "wl-copy";
         char argument_foreground[] = "--foreground";
         char argument_type[] = "--type";
-        char argument_mime[] = "text/plain;charset=utf-8";
+        char mime_text[] = "text/plain;charset=utf-8";
+        char mime_binary[] = "application/octet-stream";
         char *const arguments[] = {
             argument_program,
             argument_foreground,
             argument_type,
-            argument_mime,
+            text_content ? mime_text : mime_binary,
             NULL
         };
         execve(PV_WL_COPY_PATH, arguments, environment);
@@ -658,7 +703,11 @@ static void owner_exec(enum pv_clip_backend backend,
     _exit(127);
 }
 
-static pid_t spawn_owner(enum pv_clip_backend backend, int data_fd)
+static pid_t spawn_owner(
+    enum pv_clip_backend backend,
+    int data_fd,
+    const bool text_content
+)
 {
     int error_pipe[2] = {-1, -1};
     pid_t owner;
@@ -677,7 +726,7 @@ static pid_t spawn_owner(enum pv_clip_backend backend, int data_fd)
     }
     if (owner == 0) {
         (void)close(error_pipe[0]);
-        owner_exec(backend, data_fd, error_pipe[1], expected_parent);
+        owner_exec(backend, data_fd, error_pipe[1], expected_parent, text_content);
     }
 
     close_if_open(&error_pipe[1]);
@@ -705,12 +754,15 @@ static bool owner_has_exited(pid_t owner)
 static void terminate_owner(pid_t owner, int owner_pidfd)
 {
     int elapsed_ms = 0;
+    int kill_result;
 
     if (owner <= 0 || owner_has_exited(owner)) {
         return;
     }
     if (owner_pidfd >= 0) {
-        (void)pidfd_signal_local(owner_pidfd, SIGTERM);
+        if (pidfd_signal_local(owner_pidfd, SIGTERM) != 0) {
+            (void)kill(owner, SIGTERM);
+        }
     } else {
         (void)kill(owner, SIGTERM);
     }
@@ -726,9 +778,16 @@ static void terminate_owner(pid_t owner, int owner_pidfd)
     }
 
     if (owner_pidfd >= 0) {
-        (void)pidfd_signal_local(owner_pidfd, SIGKILL);
+        kill_result = pidfd_signal_local(owner_pidfd, SIGKILL);
+        if (kill_result != 0) {
+            kill_result = kill(owner, SIGKILL);
+        }
     } else {
-        (void)kill(owner, SIGKILL);
+        kill_result = kill(owner, SIGKILL);
+    }
+    if (kill_result != 0) {
+        /* Cleanup will exit the supervisor and trigger the owner's PDEATHSIG. */
+        return;
     }
     (void)waitpid_nointr(owner, NULL, 0);
 }
@@ -847,11 +906,17 @@ static pv_status worker_loop(int data_fd,
     struct pv_clip_setup_result setup_result;
     enum pv_clip_backend backend = PV_CLIP_BACKEND_NONE;
     uint8_t message = 0U;
+    bool text_content = true;
     pid_t owner = (pid_t)-1;
     int owner_pidfd = -1;
     int timer_fd = -1;
     pv_status status = PV_ERR_EXTERNAL;
 
+    pv_clip_stop_requested = 0;
+    if (normalize_child_signal_state() != 0) {
+        status = PV_ERR_IO;
+        goto report_setup;
+    }
     harden_clip_process();
     if (set_cloexec(data_fd) != 0 || set_cloexec(control_fd) != 0 ||
         set_cloexec(setup_fd) != 0 || install_stop_handlers() != 0) {
@@ -877,19 +942,22 @@ report_setup:
         goto cleanup;
     }
 
-    if (receive_control(control_fd, &message) != 0 || message != PV_CLIP_MSG_START ||
+    if (receive_control(control_fd, &message) != 0 ||
+        (message != PV_CLIP_MSG_START_TEXT && message != PV_CLIP_MSG_START_BINARY) ||
         pv_clip_stop_requested) {
         status = PV_ERR_STATE;
         goto cleanup;
     }
-    owner = spawn_owner(backend, data_fd);
+    text_content = message == PV_CLIP_MSG_START_TEXT;
+    owner = spawn_owner(backend, data_fd, text_content);
     if (owner < 0) {
         (void)send_control(control_fd, PV_CLIP_MSG_FAILED);
         status = PV_ERR_EXTERNAL;
         goto cleanup;
     }
+    close_if_open(&data_fd);
     owner_pidfd = pidfd_open_local(owner);
-    timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    timer_fd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
     if (timer_fd < 0) {
         (void)send_control(control_fd, PV_CLIP_MSG_FAILED);
         status = PV_ERR_IO;
@@ -904,8 +972,6 @@ report_setup:
         status = PV_ERR_EXTERNAL;
         goto cleanup;
     }
-    close_if_open(&data_fd);
-    close_if_open(&control_fd);
 
     {
         struct itimerspec timer = {
@@ -914,10 +980,21 @@ report_setup:
         };
 
         if (timerfd_settime(timer_fd, 0, &timer, NULL) != 0) {
+            (void)send_control(control_fd, PV_CLIP_MSG_FAILED);
             status = PV_ERR_IO;
             goto cleanup;
         }
     }
+    if (pv_clip_stop_requested || owner_has_exited(owner)) {
+        (void)send_control(control_fd, PV_CLIP_MSG_FAILED);
+        status = PV_ERR_EXTERNAL;
+        goto cleanup;
+    }
+    if (send_control(control_fd, PV_CLIP_MSG_ACCEPTED) != 0) {
+        status = PV_ERR_IO;
+        goto cleanup;
+    }
+    close_if_open(&control_fd);
 
     {
         int wait_result = wait_for_owner_or_timeout(owner, owner_pidfd, timer_fd);
@@ -979,6 +1056,20 @@ static pv_status wait_for_owner_ready(int control_fd)
         return PV_ERR_IO;
     }
     return message == PV_CLIP_MSG_READY ? PV_OK : PV_ERR_EXTERNAL;
+}
+
+static pv_status wait_for_owner_accepted(int control_fd)
+{
+    uint8_t message = 0U;
+    int ready = poll_one(control_fd, POLLIN, PV_CLIP_SETUP_TIMEOUT_MS);
+
+    if (ready == 0) {
+        return PV_ERR_EXTERNAL;
+    }
+    if (ready < 0 || receive_control(control_fd, &message) != 0) {
+        return PV_ERR_IO;
+    }
+    return message == PV_CLIP_MSG_ACCEPTED ? PV_OK : PV_ERR_EXTERNAL;
 }
 
 static pv_status write_secret(int data_fd,
@@ -1055,7 +1146,9 @@ pv_status pv_clipboard_prepare(pv_clipboard_job *job, unsigned ttl_seconds)
     int setup_pipe[2] = {-1, -1};
     char helper_path[PATH_MAX];
     struct pv_clip_setup_result setup_result;
+    struct sigaction previous_sigchld;
     pid_t launcher = (pid_t)-1;
+    bool sigchld_overridden = false;
     pv_status status;
 
     if (job == NULL) {
@@ -1085,6 +1178,11 @@ pv_status pv_clipboard_prepare(pv_clipboard_job *job, unsigned ttl_seconds)
         status = PV_ERR_IO;
         goto cleanup;
     }
+    if (set_sigchld_default(&previous_sigchld) != 0) {
+        status = PV_ERR_IO;
+        goto cleanup;
+    }
+    sigchld_overridden = true;
 
     launcher = fork();
     if (launcher < 0) {
@@ -1108,9 +1206,21 @@ pv_status pv_clipboard_prepare(pv_clipboard_job *job, unsigned ttl_seconds)
     close_if_open(&data_pipe[0]);
     close_if_open(&control_pair[1]);
     close_if_open(&setup_pipe[1]);
-    if (waitpid_nointr(launcher, NULL, 0) < 0) {
-        status = PV_ERR_IO;
-        goto cleanup;
+    {
+        int wait_result = waitpid_nointr(launcher, NULL, 0);
+        int wait_errno = errno;
+
+        if (sigaction(SIGCHLD, &previous_sigchld, NULL) != 0) {
+            sigchld_overridden = false;
+            status = PV_ERR_IO;
+            goto cleanup;
+        }
+        sigchld_overridden = false;
+        if (wait_result < 0) {
+            errno = wait_errno;
+            status = PV_ERR_IO;
+            goto cleanup;
+        }
     }
     status = wait_for_setup(setup_pipe[0], &setup_result);
     if (status != PV_OK) {
@@ -1126,6 +1236,10 @@ pv_status pv_clipboard_prepare(pv_clipboard_job *job, unsigned ttl_seconds)
     status = PV_OK;
 
 cleanup:
+    if (sigchld_overridden && sigaction(SIGCHLD, &previous_sigchld, NULL) != 0 &&
+        status == PV_OK) {
+        status = PV_ERR_IO;
+    }
     close_if_open(&data_pipe[0]);
     close_if_open(&data_pipe[1]);
     close_if_open(&control_pair[0]);
@@ -1151,7 +1265,12 @@ pv_status pv_clipboard_send(pv_clipboard_job *job,
     if (secret_len > PV_MAX_PLAINTEXT) {
         return PV_ERR_LIMIT;
     }
-    if (send_control(job->control_fd, PV_CLIP_MSG_START) != 0) {
+    if (send_control(
+            job->control_fd,
+            memchr(secret, '\0', secret_len) == NULL && pv_utf8_valid(secret, secret_len)
+                ? PV_CLIP_MSG_START_TEXT
+                : PV_CLIP_MSG_START_BINARY
+        ) != 0) {
         pv_clipboard_cancel(job);
         return PV_ERR_EXTERNAL;
     }
@@ -1165,6 +1284,11 @@ pv_status pv_clipboard_send(pv_clipboard_job *job,
     if (status != PV_OK || send_control(job->control_fd, PV_CLIP_MSG_DONE) != 0) {
         pv_clipboard_cancel(job);
         return status != PV_OK ? status : PV_ERR_EXTERNAL;
+    }
+    status = wait_for_owner_accepted(job->control_fd);
+    if (status != PV_OK) {
+        pv_clipboard_cancel(job);
+        return status;
     }
 
     close_if_open(&job->control_fd);

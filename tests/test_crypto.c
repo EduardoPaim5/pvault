@@ -440,6 +440,37 @@ static void header_kdf_numeric_boundaries_are_explicit(void)
     );
 }
 
+static void master_password_policy_boundaries_and_patterns(void)
+{
+    static const uint8_t strong_16[] = "A7!violet-River?";
+    static const uint8_t short_15[] = "A7!violet-River";
+    static const uint8_t common_casefold[] = "CORRECT HORSE BATTERY STAPLE";
+    static const uint8_t numeric_cycle[] = "0123456789012345";
+    static const uint8_t keyboard_cycle[] = "qwertyuiopasdfgh";
+    static const uint8_t reverse_sequence[] = "ponmlkjihgfedcba";
+    static const uint8_t periodic[] = "Ab9!Ab9!Ab9!Ab9!";
+    static const uint8_t near_pattern_but_strong[] = "qwerty-7!River-Oak";
+
+    PV_CHECK(!pv_master_password_is_acceptable(NULL, 0U));
+    PV_CHECK(!pv_master_password_is_acceptable(short_15, sizeof short_15 - 1U));
+    PV_CHECK(pv_master_password_is_acceptable(strong_16, sizeof strong_16 - 1U));
+    PV_CHECK(!pv_master_password_is_acceptable(
+        common_casefold,
+        sizeof common_casefold - 1U
+    ));
+    PV_CHECK(!pv_master_password_is_acceptable(numeric_cycle, sizeof numeric_cycle - 1U));
+    PV_CHECK(!pv_master_password_is_acceptable(keyboard_cycle, sizeof keyboard_cycle - 1U));
+    PV_CHECK(!pv_master_password_is_acceptable(
+        reverse_sequence,
+        sizeof reverse_sequence - 1U
+    ));
+    PV_CHECK(!pv_master_password_is_acceptable(periodic, sizeof periodic - 1U));
+    PV_CHECK(pv_master_password_is_acceptable(
+        near_pattern_but_strong,
+        sizeof near_pattern_but_strong - 1U
+    ));
+}
+
 void pv_test_crypto_suite(void)
 {
     pv_test_run("crypto.fixture_setup", crypto_fixture_setup);
@@ -467,6 +498,10 @@ void pv_test_crypto_suite(void)
     pv_test_run(
         "header.kdf_numeric_boundaries_are_explicit",
         header_kdf_numeric_boundaries_are_explicit
+    );
+    pv_test_run(
+        "password_policy.boundaries_and_patterns",
+        master_password_policy_boundaries_and_patterns
     );
 
     sodium_memzero(fixture_recovery, sizeof fixture_recovery);

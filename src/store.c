@@ -1838,11 +1838,12 @@ static pv_status save_locked(
     return status;
 }
 
-pv_status pv_store_create(
+static pv_status create_common(
     const char *const path,
     const uint8_t *const password,
     const size_t password_len,
     const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
+    pv_buffer *const consumed_password,
     pv_vault *const vault
 )
 {
@@ -1854,24 +1855,29 @@ pv_status pv_store_create(
     bool exists = false;
 
     if (path == NULL || password == NULL || recovery_key == NULL || vault == NULL) {
+        pv_buffer_secure_free(consumed_password);
         return PV_ERR_USAGE;
     }
     status = ensure_parent_directory(path, parent, sizeof(parent));
     if (status != PV_OK) {
+        pv_buffer_secure_free(consumed_password);
         return status;
     }
     status = lock_vault(path, &location, &lock_fd);
     if (status != PV_OK) {
+        pv_buffer_secure_free(consumed_password);
         return status;
     }
     status = path_entry_exists_at(location.directory_fd, location.name, &exists);
     if (status != PV_OK || exists) {
         unlock_vault(lock_fd, &location);
+        pv_buffer_secure_free(consumed_password);
         return status != PV_OK ? status : PV_ERR_EXISTS;
     }
     status = pv_model_init(vault, path);
     if (status != PV_OK) {
         unlock_vault(lock_fd, &location);
+        pv_buffer_secure_free(consumed_password);
         return status;
     }
     randombytes_buf(vault->vault_id, sizeof(vault->vault_id));
@@ -1884,6 +1890,7 @@ pv_status pv_store_create(
     sodium_memzero(&header, sizeof(header));
     memcpy(header.vault_id, vault->vault_id, sizeof(header.vault_id));
     status = pv_crypto_create_header(&header, password, password_len, recovery_key, vault->vmk);
+    pv_buffer_secure_free(consumed_password);
     if (status == PV_OK) {
         status = save_locked(
             &location,
@@ -1901,11 +1908,52 @@ pv_status pv_store_create(
     return status;
 }
 
+pv_status pv_store_create(
+    const char *const path,
+    const uint8_t *const password,
+    const size_t password_len,
+    const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
+    pv_vault *const vault
+)
+{
+    return create_common(path, password, password_len, recovery_key, NULL, vault);
+}
+
+pv_status pv_store_create_consume(
+    const char *const path,
+    pv_buffer *const password,
+    const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
+    pv_vault *const vault
+)
+{
+    const uint8_t *password_data;
+    size_t password_len;
+
+    if (password == NULL) {
+        return PV_ERR_USAGE;
+    }
+    if (password->data == NULL || password->len == 0U || !password->secure) {
+        pv_buffer_secure_free(password);
+        return PV_ERR_USAGE;
+    }
+    password_data = password->data;
+    password_len = password->len;
+    return create_common(
+        path,
+        password_data,
+        password_len,
+        recovery_key,
+        password,
+        vault
+    );
+}
+
 static pv_status open_common(
     const char *const path,
     const uint8_t *const credential,
     const size_t credential_len,
     const bool recovery,
+    pv_buffer *const consumed_credential,
     pv_vault *const vault,
     pv_file_header *const header
 )
@@ -1916,18 +1964,21 @@ static pv_status open_common(
     pv_status status;
 
     if (path == NULL || credential == NULL || vault == NULL) {
+        pv_buffer_secure_free(consumed_credential);
         return PV_ERR_USAGE;
     }
     memset(vault, 0, sizeof(*vault));
 
     status = read_disk_file(path, &disk);
     if (status != PV_OK) {
+        pv_buffer_secure_free(consumed_credential);
         return status;
     }
     vmk = sodium_malloc(PV_WRAP_KEY_BYTES);
     if (vmk == NULL || sodium_mlock(vmk, PV_WRAP_KEY_BYTES) != 0) {
         sodium_free(vmk);
         disk_file_destroy(&disk);
+        pv_buffer_secure_free(consumed_credential);
         return PV_ERR_SECURE_MEMORY;
     }
     if (recovery) {
@@ -1939,6 +1990,7 @@ static pv_status open_common(
     } else {
         status = pv_crypto_unlock_password(&disk.header, credential, credential_len, vmk);
     }
+    pv_buffer_secure_free(consumed_credential);
     if (status == PV_OK) {
         status = pv_crypto_decrypt_body(
             &disk.header,
@@ -1969,6 +2021,7 @@ static pv_status open_common(
     sodium_free(vmk);
     pv_buffer_secure_free(&plaintext);
     disk_file_destroy(&disk);
+    pv_buffer_secure_free(consumed_credential);
     return status;
 }
 
@@ -1980,7 +2033,37 @@ pv_status pv_store_open_password(
     pv_file_header *const header
 )
 {
-    return open_common(path, password, password_len, false, vault, header);
+    return open_common(path, password, password_len, false, NULL, vault, header);
+}
+
+pv_status pv_store_open_password_consume(
+    const char *const path,
+    pv_buffer *const password,
+    pv_vault *const vault,
+    pv_file_header *const header
+)
+{
+    const uint8_t *password_data;
+    size_t password_len;
+
+    if (password == NULL) {
+        return PV_ERR_USAGE;
+    }
+    if (password->data == NULL || password->len == 0U || !password->secure) {
+        pv_buffer_secure_free(password);
+        return PV_ERR_USAGE;
+    }
+    password_data = password->data;
+    password_len = password->len;
+    return open_common(
+        path,
+        password_data,
+        password_len,
+        false,
+        password,
+        vault,
+        header
+    );
 }
 
 pv_status pv_store_open_recovery(
@@ -1990,7 +2073,44 @@ pv_status pv_store_open_recovery(
     pv_file_header *const header
 )
 {
-    return open_common(path, recovery_key, PV_RECOVERY_KEY_BYTES, true, vault, header);
+    return open_common(
+        path,
+        recovery_key,
+        PV_RECOVERY_KEY_BYTES,
+        true,
+        NULL,
+        vault,
+        header
+    );
+}
+
+pv_status pv_store_open_recovery_consume(
+    const char *const path,
+    pv_buffer *const recovery_key,
+    pv_vault *const vault,
+    pv_file_header *const header
+)
+{
+    const uint8_t *recovery_data;
+
+    if (recovery_key == NULL) {
+        return PV_ERR_USAGE;
+    }
+    if (recovery_key->data == NULL || recovery_key->len != PV_RECOVERY_KEY_BYTES ||
+        !recovery_key->secure) {
+        pv_buffer_secure_free(recovery_key);
+        return PV_ERR_USAGE;
+    }
+    recovery_data = recovery_key->data;
+    return open_common(
+        path,
+        recovery_data,
+        PV_RECOVERY_KEY_BYTES,
+        true,
+        recovery_key,
+        vault,
+        header
+    );
 }
 
 pv_status pv_store_save(pv_vault *const vault, pv_file_header *const header, const unsigned backup_retention)

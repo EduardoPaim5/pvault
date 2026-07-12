@@ -158,12 +158,21 @@ criptografada, DMA, registradores ou um processo já comprometido.
 
 `pvault copy` cria o supervisor antes de descriptografar. O segredo nunca entra
 em `argv`, ambiente ou shell. Em X11 é executado `/usr/bin/xclip`; em Wayland,
-`/usr/bin/wl-copy`. Um `timerfd` monotônico expira apenas o processo owner
-criado pelo PVault após, por padrão, dez segundos. O owner também configura
-`PR_SET_PDEATHSIG`: se o supervisor sofrer crash, OOM ou `SIGKILL`, o kernel
-envia `SIGTERM` ao owner em vez de deixá-lo oferecendo a senha indefinidamente.
-Assim, um clipboard mais novo do usuário não é sobrescrito por uma limpeza
-vazia.
+`/usr/bin/wl-copy`. Um resultado de transporte bem-sucedido significa que o
+payload foi escrito no pipe, o lado de escrita foi fechado, o owner foi
+observado vivo e o timer foi armado; não prova que o backend externo adquiriu
+uma seleção utilizável, por isso a CLI diz "queued". Um `timerfd` baseado em
+`CLOCK_BOOTTIME` expira
+apenas o processo owner criado pelo PVault após, por padrão, dez segundos; o
+tempo suspenso do notebook também conta. Worker e owner normalizam a máscara e
+as disposições herdadas de SIGTERM/SIGINT/SIGHUP/SIGCHLD. O owner configura
+`PR_SET_PDEATHSIG`: se o
+supervisor sofrer crash, OOM ou `SIGKILL`, o kernel envia `SIGTERM` ao owner em
+vez de deixá-lo oferecendo a senha indefinidamente. Assim, um clipboard mais
+novo do usuário não é sobrescrito por uma limpeza vazia.
+
+No Wayland, texto UTF-8 sem NUL usa `text/plain;charset=utf-8`; slices binários
+usam `application/octet-stream`, preservando bytes sem rotulá-los como texto.
 
 Exemplo i3:
 

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #define PV_SECRET_INPUT_MAX 1024U
+#define PV_MASTER_PASSWORD_MIN_BYTES 16U
 
 typedef struct pv_secret_signal_guard {
     struct sigaction previous[5];
@@ -136,6 +137,144 @@ pv_status pv_secure_buffer_alloc(pv_buffer *const buffer, const size_t length)
     }
     sodium_memzero(buffer->data, length);
     return PV_OK;
+}
+
+static uint8_t ascii_lower(const uint8_t byte)
+{
+    if (byte >= (uint8_t)'A' && byte <= (uint8_t)'Z') {
+        return (uint8_t)(byte + ((uint8_t)'a' - (uint8_t)'A'));
+    }
+    return byte;
+}
+
+static bool password_equals_ascii_casefold(
+    const uint8_t *const password,
+    const size_t password_len,
+    const char *const candidate
+)
+{
+    const size_t candidate_len = strlen(candidate);
+    size_t index;
+    uint8_t difference = 0U;
+
+    if (password_len != candidate_len) {
+        return false;
+    }
+    for (index = 0U; index < password_len; ++index) {
+        difference |= ascii_lower(password[index]) ^ ascii_lower((uint8_t)candidate[index]);
+    }
+    return difference == 0U;
+}
+
+static bool password_follows_cycle(
+    const uint8_t *const password,
+    const size_t password_len,
+    const char *const cycle
+)
+{
+    const size_t cycle_len = strlen(cycle);
+    size_t offset;
+
+    for (offset = 0U; offset < cycle_len; ++offset) {
+        size_t index;
+
+        for (index = 0U; index < password_len; ++index) {
+            if (ascii_lower(password[index]) !=
+                ascii_lower((uint8_t)cycle[(offset + index) % cycle_len])) {
+                break;
+            }
+        }
+        if (index == password_len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool password_is_full_sequence(const uint8_t *const password, const size_t password_len)
+{
+    static const char *const cycles[] = {
+        "0123456789",
+        "9876543210",
+        "abcdefghijklmnopqrstuvwxyz",
+        "zyxwvutsrqponmlkjihgfedcba",
+        "qwertyuiopasdfghjklzxcvbnm",
+        "mnbvcxzlkjhgfdsapoiuytrewq"
+    };
+    size_t index;
+
+    if (password_len >= 2U) {
+        const int step = (int)password[1] - (int)password[0];
+
+        if (step == 1 || step == -1) {
+            for (index = 2U; index < password_len; ++index) {
+                if ((int)password[index] - (int)password[index - 1U] != step) {
+                    break;
+                }
+            }
+            if (index == password_len) {
+                return true;
+            }
+        }
+    }
+    for (index = 0U; index < sizeof(cycles) / sizeof(cycles[0]); ++index) {
+        if (password_follows_cycle(password, password_len, cycles[index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool password_is_periodic(const uint8_t *const password, const size_t password_len)
+{
+    size_t period;
+
+    for (period = 1U; period <= password_len / 2U; ++period) {
+        size_t index;
+
+        for (index = period; index < password_len; ++index) {
+            if (password[index] != password[index % period]) {
+                break;
+            }
+        }
+        if (index == password_len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pv_master_password_is_acceptable(
+    const uint8_t *const password,
+    const size_t password_len
+)
+{
+    static const char *const common_passwords[] = {
+        "correcthorsebatterystaple",
+        "correct horse battery staple",
+        "passwordpassword",
+        "password12345678",
+        "password123456789",
+        "letmeinletmeinletmein",
+        "adminadminadminadmin",
+        "qwertyqwertyqwerty",
+        "iloveyouiloveyou",
+        "thisisnotasecurepassword"
+    };
+    size_t index;
+
+    /* This rejects conspicuously weak choices; it is deliberately not an entropy estimator. */
+    if (password == NULL || password_len < PV_MASTER_PASSWORD_MIN_BYTES ||
+        password_is_full_sequence(password, password_len) ||
+        password_is_periodic(password, password_len)) {
+        return false;
+    }
+    for (index = 0U; index < sizeof(common_passwords) / sizeof(common_passwords[0]); ++index) {
+        if (password_equals_ascii_casefold(password, password_len, common_passwords[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static pv_status read_one_secret(const int fd, const char *const prompt, pv_buffer *const secret)
