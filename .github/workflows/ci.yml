@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -38,8 +39,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify Git checkout
+      - name: Trust and verify Git checkout
         run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse --is-inside-work-tree)" = true
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
@@ -63,8 +66,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify Git checkout
+      - name: Trust and verify Git checkout
         run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse --is-inside-work-tree)" = true
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
@@ -91,8 +96,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify Git checkout
+      - name: Trust and verify Git checkout
         run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse --is-inside-work-tree)" = true
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
@@ -116,8 +123,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify Git checkout
+      - name: Trust and verify Git checkout
         run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse --is-inside-work-tree)" = true
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
