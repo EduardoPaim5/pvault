@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DISPLAY: ''
+  WAYLAND_DISPLAY: ''
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: archlinux:base-devel
+      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [gcc, clang, sanitize, release]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja pkgconf libsodium libcbor ncurses xclip
+          gcc clang git python
+      - name: Build and test
+        run: ./scripts/ci-build.sh "${{ matrix.profile }}"
+
+  fuzz-smoke:
+    name: libFuzzer smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install fuzz dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja pkgconf libsodium libcbor ncurses xclip
+          clang git python
+      - name: Run bounded fuzz smoke
+        env:
+          PVAULT_FUZZ_RUNS: '2000'
+        run: ./scripts/fuzz-smoke.sh
+
+  real-x11-clipboard:
+    name: Real xclip on disposable X11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install X11 test dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja pkgconf libsodium libcbor ncurses
+          xclip libx11 xorg-server-xvfb xorg-xauth
+          gcc git python
+      - name: Exercise the real X11 clipboard owner
+        run: ./scripts/test-real-x11.sh
+
+  reproducibility:
+    name: Reproducible install tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: archlinux:base-devel
+      options: --ulimit core=0:0 --ulimit memlock=8388608:8388608
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install release dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja pkgconf libsodium libcbor ncurses xclip
+          gcc git python
+      - name: Check publication boundary
+        run: ./scripts/check-publication.sh
+      - name: Compare two independent builds
+        run: ./scripts/reproducible-build.sh

@@ -1,0 +1,61 @@
+# Maintainer: PVault contributors
+# Pre-alpha development package. Create the source archive before invoking
+# makepkg:
+#   git archive --format=tar.gz --prefix=pvault-0.1.0/ \
+#     -o packaging/pvault-0.1.0.tar.gz HEAD
+
+pkgname=pvault
+# The CLI appends the separate maturity label "pre-alpha".
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Experimental local-first, keyboard-driven password vault'
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+depends=('glibc' 'libsodium' 'libcbor' 'ncurses' 'xclip')
+makedepends=('cmake' 'ninja' 'pkgconf' 'python')
+optdepends=(
+  'wl-clipboard: clipboard support on Wayland'
+  'rofi: optional external record picker'
+)
+source=("$pkgname-$pkgver.tar.gz")
+# Local development archive only. Replace SKIP with the published archive's
+# SHA-256 digest before distributing this PKGBUILD.
+sha256sums=('SKIP')
+
+build() {
+  cmake \
+    -S "$srcdir/$pkgname-$pkgver" \
+    -B build \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_TESTING=ON \
+    -DPVAULT_ENABLE_HARDENING=ON
+  cmake --build build
+}
+
+check() {
+  ctest --test-dir build --output-on-failure
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+
+  install -Dm644 "$srcdir/$pkgname-$pkgver/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/README.md" \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/SECURITY.md" \
+    "$pkgdir/usr/share/doc/$pkgname/SECURITY.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/THREAT_MODEL.md" \
+    "$pkgdir/usr/share/doc/$pkgname/THREAT_MODEL.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/docs/FORMAT.md" \
+    "$pkgdir/usr/share/doc/$pkgname/FORMAT.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/docs/ARCHITECTURE.pt-BR.md" \
+    "$pkgdir/usr/share/doc/$pkgname/ARCHITECTURE.pt-BR.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/docs/ROADMAP.pt-BR.md" \
+    "$pkgdir/usr/share/doc/$pkgname/ROADMAP.pt-BR.md"
+  install -Dm644 "$srcdir/$pkgname-$pkgver/docs/RELEASES.md" \
+    "$pkgdir/usr/share/doc/$pkgname/RELEASES.md"
+}

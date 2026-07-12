@@ -1,0 +1,231 @@
+.TH PVAULT 1 "2026-07-11" "PVault 0.1.0-pre-alpha" "User Commands"
+.SH NAME
+pvault \- experimental local-first password vault
+.SH SYNOPSIS
+.B pvault
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B pvault
+is a keyboard-driven password vault for Linux. It stores records in one local,
+authenticated encrypted file and retrieves secret fields through a short-lived
+clipboard owner.
+.PP
+PVault is pre-alpha software. It has not received an independent security audit
+and must not be used for real credentials or as the only copy of important
+data.
+.PP
+The master password is read from the controlling terminal with echo disabled.
+It is never accepted as a command-line argument. Secret fields are not printed
+by normal commands.
+.SH COMMANDS
+.TP
+.B init [--vault PATH] --recovery-out PATH
+Create a new vault and a separate recovery-key file. The destination recovery
+file must not already exist. Move that file to separate offline storage after
+verifying it. If vault creation succeeds but writing the recovery file fails,
+the empty vault is retained; unlock it with the master password and run
+.B recovery rotate --out PATH
+before adding records.
+.TP
+.B add
+Create a record using the internal terminal form.
+.TP
+.B edit QUERY
+Edit the uniquely matching record. Secret values are not passed to an external
+editor.
+.TP
+.B remove QUERY
+Mark the uniquely matching record as deleted after confirmation.
+.TP
+.B list [QUERY]
+List non-secret record summaries, optionally filtered by QUERY.
+.TP
+.B show QUERY
+Show non-secret metadata for one record. Passwords and custom fields marked
+secret are omitted.
+.TP
+.B copy QUERY [--field FIELD] [--ttl SECONDS]
+Offer the selected field through the clipboard for a limited time. FIELD
+defaults to the password field and SECONDS defaults to 10.
+.TP
+.B pick [--copy] [--rofi]
+Search records with the keyboard-driven picker. The default picker runs inside
+PVault. With
+.BR --rofi ,
+only a display title and the full hexadecimal record identifier are exposed to
+the external picker.
+.TP
+.B generate [--length N]
+Generate a password using libsodium randomness and offer it through the
+clipboard. It is not printed. N defaults to 24 and must be from 12 through 256.
+.TP
+.B passwd [--recovery FILE]
+Change the password keyslot without changing the random vault master key.
+Normally the current master password authenticates the operation. With
+.BR --recovery ,
+read the recovery key from FILE and use it to authorize setting a new master
+password. The recovery key itself is never accepted as an argument.
+.TP
+.B recovery rotate --out PATH
+Generate a new recovery keyslot and write the replacement recovery code to a
+new file. The previous recovery key becomes invalid after a successful save.
+.TP
+.B backup --output PATH
+Copy the current encrypted vault snapshot to PATH.
+.TP
+.B restore PATH
+Authenticate an encrypted backup before replacing the active vault. The current
+vault is backed up before replacement. Restore rolls back the complete snapshot,
+including password and recovery keyslots; historical credentials may become
+active again.
+.TP
+.B doctor
+Check file structure, authentication, parent/lock permissions, and payload
+validity without displaying record content.
+.TP
+.B shell
+Open an interactive session. The decrypted vault stays only in the current
+process and locks after the configured inactivity timeout (300 seconds by
+default).
+.TP
+.B help
+Display the commands supported by the installed revision.
+.SH COMMON OPTIONS
+.TP
+.BI --vault " PATH"
+Use the absolute PATH instead of the configured/default vault. Relative paths
+are rejected.
+.TP
+.BR -h , " --help"
+Display command help.
+.TP
+.B --version
+Display the program version.
+.SH FILES
+.TP
+.I $XDG_DATA_HOME/pvault/vault.pvlt
+Default encrypted vault. If
+.B XDG_DATA_HOME
+is unset,
+.I $HOME/.local/share
+is used.
+.TP
+.I $XDG_DATA_HOME/pvault/backups/
+Encrypted snapshot backups.
+.TP
+.I $XDG_CONFIG_HOME/pvault/config
+Non-secret configuration. If
+.B XDG_CONFIG_HOME
+is unset,
+.I $HOME/.config
+is used.
+.PP
+PVault creates private directories with mode 0700 and files with mode 0600
+under a restrictive umask. These permissions do not protect data from root or
+from a compromised user session.
+.PP
+PVault does not chmod an existing parent directory. The immediate parent of a
+vault, backup, or recovery destination must be owned by the current user and
+must not be group/world-writable.
+.PP
+For a custom vault path, automatic snapshots are stored in a literal
+.I backups/
+directory beside the vault. For example,
+.I /safe/pvault/main.pvlt
+uses
+.IR /safe/pvault/backups/ .
+PVault rejects a symlink or foreign-owned backup directory and may set an
+existing owner-owned backup directory to mode 0700. Use a dedicated vault
+parent to avoid colliding with an unrelated directory named
+.IR backups .
+.SH CLIPBOARD
+On X11, PVault uses
+.B xclip
+as a foreground selection owner. On Wayland it uses
+.BR wl-copy .
+The helper is executed directly without a shell; the secret travels through an
+anonymous pipe, not an argument or environment variable.
+.PP
+At expiration PVault terminates only the clipboard owner it created. It does not
+copy an empty value, so newer clipboard content is not intentionally erased.
+The owner is also terminated by the kernel if its PVault supervisor dies
+abruptly.
+Clipboard managers and applications can retain a password after reading it;
+expiration cannot revoke an already consumed copy. X11 clients in the same
+session can request the selection.
+.SH CONFIGURATION
+The configuration file is a strict, non-secret file containing one
+.I key=value
+assignment per line. Blank lines and lines whose first non-space character is
+.B #
+are ignored. Unknown keys and invalid values are rejected rather than silently
+ignored. Accepted keys are:
+.TP
+.B vault_path=PATH
+Absolute vault path. The default is the XDG data path documented under FILES.
+.TP
+.B clipboard_ttl_seconds=N
+Clipboard lifetime from 1 through 300 seconds. The default is 10.
+.TP
+.B session_idle_seconds=N
+Shell inactivity timeout from 30 through 86400 seconds. The default is 300.
+.TP
+.B backup_retention=N
+Number of encrypted automatic snapshots to retain, from 1 through 1000. The
+default is 20.
+.TP
+.B picker=internal|rofi
+Picker implementation. The default is
+.BR internal .
+.PP
+Do not place passwords, recovery keys, or other secrets in this file.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Invalid command or option.
+.TP
+.B 3
+Authentication or integrity failure.
+.TP
+.B 4
+Input/output failure.
+.TP
+.B 5
+Required secure-memory or process-hardening operation failed.
+.TP
+.B 6
+Vault lock or concurrent-update conflict.
+.TP
+.B 7
+External integration, such as a clipboard backend, is unavailable.
+.SH SECURITY NOTES
+Use a strong, unique master password and keep the recovery key separate from
+encrypted backups. Prefer encrypted swap and avoid unencrypted hibernation.
+Do not use persistent clipboard history for secrets. If an update reports that
+it was committed but durability could not be confirmed, preserve both the old
+and new recovery material and verify the vault before taking another action.
+.PP
+.B mlock
+reduces normal swap exposure but does not protect from root, a compromised
+kernel, a debugger, malicious display-server clients, or physical-memory
+attacks. Catchable signals during hidden secret input restore the TTY before
+the original signal is re-raised. SIGKILL and power loss do not execute cleanup
+code.
+.PP
+See
+.I THREAT_MODEL.md
+and
+.I docs/FORMAT.md
+in the source distribution for the complete design boundary and file format.
+.SH BUGS
+Report ordinary bugs through the project issue tracker using synthetic data.
+Follow
+.I SECURITY.md
+for vulnerabilities; never publish a real vault, password, recovery key, or
+memory dump.
+.SH LICENSE
+GPL-3.0-or-later.

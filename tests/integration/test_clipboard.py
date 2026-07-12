@@ -1,0 +1,380 @@
+from __future__ import annotations
+
+import json
+import hashlib
+import os
+import select
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from pty_harness import (
+    matching_processes,
+    pid_exists,
+    process_file,
+    process_starttime,
+    wait_until,
+)
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+DRIVER_SOURCE = REPOSITORY / "tests" / "integration" / "clipboard_driver.c"
+FAKE_OWNER_SOURCE = REPOSITORY / "tests" / "integration" / "fake_clipboard_owner.c"
+
+
+class ClipboardIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        if compiler is None:
+            raise unittest.SkipTest("a C compiler is required for clipboard integration tests")
+        integration_root = REPOSITORY / "build"
+        integration_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cls._temporary = tempfile.TemporaryDirectory(
+            prefix="pvault-clipboard-", dir=integration_root
+        )
+        cls.root = Path(cls._temporary.name)
+        cls.root.chmod(0o700)
+        cls.build = cls.root / "bin"
+        cls.build.mkdir(mode=0o700)
+        cls.fake_owner = cls.build / "fake-clipboard-owner"
+        cls.driver = cls.build / "clipboard-driver"
+        cls.helper = cls.build / "pvault-clip"
+
+        common = [
+            compiler,
+            "-std=c11",
+            "-D_GNU_SOURCE",
+            "-D_POSIX_C_SOURCE=200809L",
+            f'-DPV_XCLIP_PATH="{cls.fake_owner}"',
+            f'-DPV_WL_COPY_PATH="{cls.fake_owner}"',
+            "-Wall",
+            "-Wextra",
+            "-Wpedantic",
+            "-Werror",
+            "-I",
+            str(REPOSITORY / "include"),
+            "-I",
+            str(REPOSITORY / "src"),
+        ]
+        cls._compile(
+            common
+            + [
+                str(FAKE_OWNER_SOURCE),
+                "-lsodium",
+                "-o",
+                str(cls.fake_owner),
+            ]
+        )
+        cls._compile(
+            common
+            + [
+                str(DRIVER_SOURCE),
+                str(REPOSITORY / "src" / "clipboard.c"),
+                str(REPOSITORY / "src" / "error.c"),
+                "-o",
+                str(cls.driver),
+            ]
+        )
+        cls._compile(
+            common
+            + [
+                str(REPOSITORY / "src" / "clip_main.c"),
+                str(REPOSITORY / "src" / "clipboard.c"),
+                str(REPOSITORY / "src" / "error.c"),
+                "-o",
+                str(cls.helper),
+            ]
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._temporary.cleanup()
+
+    @classmethod
+    def _compile(cls, command: list[str]) -> None:
+        completed = subprocess.run(
+            command,
+            cwd=REPOSITORY,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30.0,
+        )
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.decode("utf-8", "replace")[-4000:]
+            raise RuntimeError(f"clipboard test harness compilation failed:\n{diagnostic}")
+
+    def assert_secret_absent(self, secret: bytes, data: bytes, location: str) -> None:
+        if secret in data:
+            self.fail(f"secret appeared in {location}")
+
+    def setUp(self) -> None:
+        self._baseline_workers = matching_processes(b"pvault-clip", b"--worker")
+        self.control_directories: list[Path] = []
+        self.owner_starttimes: dict[int, bytes] = {}
+
+    @staticmethod
+    def _signal_matching_process(
+        pid: int,
+        expected_starttime: bytes | None,
+        signal_number: int,
+        required_argument: bytes | None = None,
+    ) -> bool:
+        if expected_starttime is None:
+            return False
+        try:
+            pidfd = os.pidfd_open(pid, 0)
+        except (AttributeError, OSError, ProcessLookupError):
+            return False
+        try:
+            if process_starttime(pid) != expected_starttime:
+                return False
+            command = process_file(pid, "cmdline")
+            if required_argument is not None:
+                if command is None or required_argument not in command.split(b"\0"):
+                    return False
+            signal.pidfd_send_signal(pidfd, signal_number)
+            return True
+        except (AttributeError, OSError, ProcessLookupError):
+            return False
+        finally:
+            os.close(pidfd)
+
+    def tearDown(self) -> None:
+        new_workers = matching_processes(b"pvault-clip", b"--worker") - self._baseline_workers
+        for pid in new_workers:
+            starttime = process_starttime(pid)
+            self._signal_matching_process(
+                pid,
+                starttime,
+                signal.SIGTERM,
+                b"--worker",
+            )
+        for directory in self.control_directories:
+            owner_file = directory / "owner.pid"
+            if not owner_file.exists():
+                continue
+            try:
+                owner = int(owner_file.read_text(encoding="ascii").strip())
+                self._signal_matching_process(
+                    owner,
+                    self.owner_starttimes.get(owner),
+                    signal.SIGKILL,
+                )
+            except (OSError, ValueError):
+                pass
+
+    def _control(self, prefix: str) -> Path:
+        directory = Path(tempfile.mkdtemp(prefix=prefix, dir=self.root))
+        directory.chmod(0o700)
+        self.control_directories.append(directory)
+        return directory
+
+    @staticmethod
+    def _environment(control: Path, backend: str) -> dict[str, str]:
+        environment = {
+            "FORBIDDEN_CLIPBOARD_CANARY": "must-not-reach-owner",
+            "HOME": str(control),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        }
+        if backend == "x11":
+            environment["DISPLAY"] = ":pvault-integration"
+        elif backend == "wayland":
+            environment["WAYLAND_DISPLAY"] = "wayland-pvault-integration"
+            environment["XDG_RUNTIME_DIR"] = str(control)
+        else:  # pragma: no cover - internal test misuse
+            raise ValueError(backend)
+        return environment
+
+    @staticmethod
+    def _supervisor_from_output(output: bytes) -> int:
+        for line in output.splitlines():
+            if line.startswith(b"SUPERVISOR "):
+                return int(line.split(maxsplit=1)[1])
+        raise AssertionError("driver did not report a supervisor pid")
+
+    def _send_secret(self, backend: str, ttl: int, secret: bytes, *, early_exit: bool = False) -> tuple[Path, int, bytes]:
+        control = self._control(f"{backend}-")
+        if early_exit:
+            (control / "exit-after-read").touch(mode=0o600)
+        environment = self._environment(control, backend)
+        invocation = [self.driver, "send", str(ttl)]
+        invocation_blob = b"\0".join(os.fsencode(item) for item in invocation)
+        environment_blob = b"\0".join(
+            os.fsencode(key) + b"=" + os.fsencode(value)
+            for key, value in environment.items()
+        )
+        self.assert_secret_absent(secret, invocation_blob, "clipboard argv")
+        self.assert_secret_absent(secret, environment_blob, "clipboard environment")
+
+        completed = subprocess.run(
+            invocation,
+            input=secret,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=REPOSITORY,
+            env=environment,
+            check=False,
+            timeout=10.0,
+        )
+        safe_stdout = completed.stdout.replace(secret, b"<redacted>")
+        safe_stderr = completed.stderr.replace(secret, b"<redacted>")
+        files = sorted(path.name for path in control.iterdir())
+        self.assertEqual(
+            0,
+            completed.returncode,
+            f"clipboard driver failed; stdout={safe_stdout!r}; "
+            f"stderr={safe_stderr!r}; control_files={files!r}",
+        )
+        self.assert_secret_absent(secret, completed.stdout, "clipboard stdout")
+        self.assert_secret_absent(secret, completed.stderr, "clipboard stderr")
+        supervisor = self._supervisor_from_output(completed.stdout)
+        wait_until(lambda: (control / "received.ready").exists(), 3.0, "fake owner input")
+        result = json.loads((control / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(secret), result["length"])
+        self.assertEqual(hashlib.sha256(secret).hexdigest(), result["sha256"])
+        return control, supervisor, completed.stdout + completed.stderr
+
+    def _assert_owner_metadata_is_secret_free(self, control: Path, secret: bytes, backend: str) -> int:
+        owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
+        supervisor = int((control / "supervisor.pid").read_text(encoding="ascii").strip())
+        result = json.loads((control / "result.json").read_text(encoding="utf-8"))
+        self.assertFalse(result["secret_in_argv"])
+        self.assertFalse(result["secret_in_cmdline"])
+        self.assertFalse(result["secret_in_environment"])
+        self.assertFalse(result["forbidden_canary_present"])
+        self.assertEqual(backend, result["argument_shape"])
+        worker_cmdline = process_file(supervisor, "cmdline")
+        if worker_cmdline is not None:
+            self.assert_secret_absent(secret, worker_cmdline, "clipboard worker cmdline")
+        self.assertTrue(pid_exists(owner))
+        self.assertTrue(pid_exists(supervisor))
+        starttime = process_starttime(owner)
+        self.assertIsNotNone(starttime)
+        assert starttime is not None
+        self.owner_starttimes[owner] = starttime
+        return owner
+
+    def test_x11_secret_uses_pipe_and_timeout_reaps_owner_and_supervisor(self) -> None:
+        secret = b"X11-CLIPBOARD-SECRET-DO-NOT-LOG"
+        started = time.monotonic()
+        control, supervisor, _ = self._send_secret("x11", 2, secret)
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "x11")
+        wait_until(lambda: not pid_exists(owner), 5.0, "X11 owner timeout")
+        wait_until(lambda: not pid_exists(supervisor), 5.0, "X11 supervisor exit")
+        self.assertGreaterEqual(time.monotonic() - started, 1.5)
+        self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
+        self.assertEqual(1, len((control / "invocations.log").read_text().splitlines()))
+
+    def test_wayland_arguments_environment_and_timeout(self) -> None:
+        secret = b"WAYLAND-CLIPBOARD-SECRET-DO-NOT-LOG"
+        control, supervisor, _ = self._send_secret("wayland", 1, secret)
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
+        wait_until(lambda: not pid_exists(owner), 4.0, "Wayland owner timeout")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "Wayland supervisor exit")
+
+    def test_owner_exit_early_does_not_spawn_a_clear_operation(self) -> None:
+        secret = b"EARLY-EXIT-CLIPBOARD-SECRET"
+        started = time.monotonic()
+        control, supervisor, _ = self._send_secret("x11", 20, secret, early_exit=True)
+        owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
+        wait_until(lambda: not pid_exists(owner), 3.0, "early owner exit")
+        wait_until(lambda: not pid_exists(supervisor), 3.0, "early supervisor exit")
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertTrue((control / "exited-early").exists())
+        self.assertEqual(1, len((control / "invocations.log").read_text().splitlines()))
+        self.assertFalse((control / "signal.txt").exists())
+
+    def test_owner_dies_if_supervisor_is_killed_after_receiving_secret(self) -> None:
+        secret = b"SUPERVISOR-DEATH-CLIPBOARD-SECRET"
+        control, supervisor, _ = self._send_secret("x11", 30, secret)
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "x11")
+        supervisor_starttime = process_starttime(supervisor)
+        self.assertTrue(
+            self._signal_matching_process(
+                supervisor,
+                supervisor_starttime,
+                signal.SIGKILL,
+                b"--worker",
+            ),
+            "refused to signal a supervisor whose identity could not be verified",
+        )
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "killed supervisor exit")
+        wait_until(lambda: not pid_exists(owner), 4.0, "owner parent-death cleanup")
+        self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
+
+    def test_dead_supervisor_returns_error_without_sigpipe_termination(self) -> None:
+        secret = b"BROKEN-CONTROL-CHANNEL-SECRET"
+        control = self._control("broken-control-")
+        process = subprocess.Popen(
+            [self.driver, "send", "30"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=REPOSITORY,
+            env=self._environment(control, "x11"),
+        )
+        self.assertIsNotNone(process.stdout)
+        assert process.stdout is not None
+        readable, _, _ = select.select([process.stdout], [], [], 8.0)
+        self.assertTrue(readable, "driver did not finish clipboard preparation")
+        first_line = process.stdout.readline()
+        supervisor = self._supervisor_from_output(first_line)
+        try:
+            self.assertTrue(
+                self._signal_matching_process(
+                    supervisor,
+                    process_starttime(supervisor),
+                    signal.SIGKILL,
+                    b"--worker",
+                ),
+                "refused to signal a supervisor whose identity could not be verified",
+            )
+            wait_until(lambda: not pid_exists(supervisor), 4.0, "dead control peer")
+            stdout, stderr = process.communicate(input=secret, timeout=5.0)
+            output = first_line + stdout + stderr
+            self.assertNotEqual(0, process.returncode)
+            self.assertNotEqual(-signal.SIGPIPE, process.returncode)
+            self.assert_secret_absent(secret, output, "broken-control diagnostics")
+            self.assertFalse((control / "owner.pid").exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2.0)
+
+    def test_signal_while_prepared_leaves_no_worker_or_owner(self) -> None:
+        control = self._control("signal-")
+        environment = self._environment(control, "x11")
+        process = subprocess.Popen(
+            [self.driver, "hold", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=REPOSITORY,
+            env=environment,
+        )
+        self.assertIsNotNone(process.stdout)
+        assert process.stdout is not None
+        readable, _, _ = select.select([process.stdout], [], [], 8.0)
+        self.assertTrue(readable, "driver did not finish clipboard preparation")
+        line = process.stdout.readline()
+        supervisor = self._supervisor_from_output(line)
+        self.assertTrue(pid_exists(supervisor))
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(-signal.SIGTERM, process.wait(timeout=5.0))
+        process.communicate(timeout=1.0)
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "worker cleanup after signal")
+        self.assertFalse((control / "owner.pid").exists())
+        remaining = matching_processes(b"pvault-clip", b"--worker") - self._baseline_workers
+        self.assertEqual(set(), remaining)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
