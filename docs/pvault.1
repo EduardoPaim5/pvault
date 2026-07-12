@@ -47,7 +47,8 @@ secret are omitted.
 .TP
 .B copy QUERY [--field FIELD] [--ttl SECONDS]
 Offer the selected field through the clipboard for a limited time. FIELD
-defaults to the password field and SECONDS defaults to 10.
+defaults to the password field and SECONDS defaults to the configured clipboard
+TTL, initially 10.
 .TP
 .B pick [--copy] [--rofi]
 Search records with the keyboard-driven picker. The default picker runs inside
@@ -82,9 +83,30 @@ active again. An existing active vault must have the same vault ID as the
 backup; cross-vault replacement is rejected. The active ID is read from its
 cleartext header and does not authenticate a damaged active body.
 .TP
+.B rescue inspect SNAPSHOT
+Validate private-file metadata, size, and framing without a credential. All
+reported header values are explicitly unauthenticated. The body is not parsed
+and no file is written.
+.TP
+.B rescue verify SNAPSHOT [--recovery FILE]
+Authenticate the complete snapshot with a master password read from the TTY or
+with FILE, then report only authenticated format, vault ID, generation, record
+count, and encrypted snapshot hash. Record contents are not displayed.
+.TP
+.B rescue recover SNAPSHOT --output PATH [--recovery FILE]
+Authenticate SNAPSHOT and publish a byte-exact encrypted copy at a new PATH.
+The destination is mode 0400, is never overwritten, and is verified by readback.
+The source and configured active vault are not modified.
+.TP
+.B rollback SNAPSHOT --output PATH [--recovery FILE]
+Create the same authenticated, read-only separate copy for application rollback.
+This command never replaces the active vault and is not an in-place format
+downgrade. Use the signed compatible reader against PATH explicitly.
+.TP
 .B doctor
-Check file framing and parent, snapshot, and lock metadata without displaying
-record content. This command does not authenticate or decrypt the body.
+Check file framing and parent, snapshot, and lock metadata, then request the
+master password to authenticate and validate the complete payload. Record
+content is not displayed.
 .TP
 .B shell
 Open an interactive session. The decrypted vault stays only in the current
@@ -209,6 +231,10 @@ Do not place passwords, recovery keys, or other secrets in this file.
 .B 0
 Success.
 .TP
+.B 1
+Operation not performed because an object was not found or the destination
+already exists.
+.TP
 .B 2
 Invalid command or option.
 .TP
@@ -216,7 +242,8 @@ Invalid command or option.
 Authentication, integrity, malformed-format, or unsupported-version failure.
 .TP
 .B 4
-Input/output failure.
+Input/output failure, or a published update whose durability could not be
+confirmed.
 .TP
 .B 5
 Required secure-memory or process-hardening operation failed.

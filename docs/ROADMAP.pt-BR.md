@@ -45,15 +45,21 @@ Infraestrutura entregue neste marco:
   clipboard da sessão do usuário;
 - comparação automatizada de duas árvores de instalação Release independentes;
 - procedimento documentado de release, assinatura, checksums e reprodução;
-- contrato documentado (ainda não implementação) para tratamento fail-closed,
-  congelamento do v1.0, futura migração transacional, rollback e rescue;
+- contrato documentado para tratamento fail-closed, congelamento do v1.0,
+  rollback e rescue; somente a futura migração cross-version ainda não possui
+  implementação;
 - abertura de snapshots via descritor validado, rejeição de symlink/hardlink e
   permissões inseguras;
 - transações confinadas a um `dirfd` estável, publicação `no-replace` em `init`
   e backups, readback pós-commit e recusa de sobrescrever arquivo não-PVault em
   `restore`, incluindo recusa de troca implícita entre linhagens de cofre;
 - retenção automática isolada por cofre, com AEAD/CBOR e geração autenticada,
-  pinning 0400 e falha conservadora antes de qualquer poda suspeita.
+  pinning 0400 e falha conservadora antes de qualquer poda suspeita;
+- `rescue inspect/verify/recover` e rollback-copy separados do cofre ativo,
+  com publicação 0400 no-replace, readback byte-exato e autenticação por senha
+  ou recovery;
+- restore drill local descartável com canários sintéticos, backup, mutação,
+  rescue, verificação pelos dois keyslots e restore em caminho isolado.
 
 Permanecem como gates da fase:
 
@@ -66,9 +72,14 @@ Permanecem como gates da fase:
 - campanhas longas de fuzzing, minimização e triagem privada dos artefatos;
 - reprodução cruzada em duas máquinas e toolchains independentes;
 - publicação efetiva de release assinada e checksum real no PKGBUILD;
-- congelamento do formato v1.0 com vetores independentes e implementação testada
-  do contrato de migração/rescue;
-- restauração ensaiada com dados sintéticos.
+- congelamento do formato v1.0 com vetores independentes e drill testado de
+  rescue, rollback-copy e restore;
+- repetição do restore drill em uma máquina separada.
+
+O v1.0 é o primeiro e único formato implementado. Uma migração v1→v1 seria
+apenas regravação e não satisfaria o contrato. A migração cross-version passa a
+ser gate obrigatório da primeira release que escrever um vNext real, com
+fixture N-1, política explícita para recovery e transformação sem perda.
 
 Gate: não recomendar credenciais reais antes de corrigir achados da auditoria e
 executar recuperação periódica de snapshots em uma máquina separada.
