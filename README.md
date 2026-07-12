@@ -28,7 +28,9 @@ path, and CLI have been exercised and reviewed.
 
 The exact security boundary and known limitations are documented in
 [`THREAT_MODEL.md`](THREAT_MODEL.md). The file format is specified in
-[`docs/FORMAT.md`](docs/FORMAT.md).
+[`docs/FORMAT.md`](docs/FORMAT.md). Fail-closed version handling, format freeze,
+migration, rollback, and rescue rules are defined in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 The complete architecture and four-phase roadmap are available in Portuguese:
 [`docs/ARCHITECTURE.pt-BR.md`](docs/ARCHITECTURE.pt-BR.md) and
@@ -54,7 +56,7 @@ Build:
 - Ninja
 - `pkgconf`
 - GCC or Clang
-- Python 3.10 or newer for PTY/clipboard integration tests
+- Python 3.10 or newer for compatibility-vector and PTY/clipboard tests
 - Git for reproducibility checks and source archives
 - GnuPG for release signing (release maintainers only)
 

@@ -12,6 +12,12 @@ Arch `pkgver` component. Release review must compare both the numeric version
 and the maturity label independently. Tags and source archive prefixes use the
 numeric form, such as `v0.1.0` and `pvault-0.1.0/`.
 
+The application version is independent of the file-format version. The current
+application writes the pre-alpha format v1.0 draft; an application release does
+not freeze or increment that format implicitly. Format freeze, compatibility,
+migration, rollback, and rescue follow
+[`COMPATIBILITY.md`](COMPATIBILITY.md).
+
 ## Local verification entry points
 
 The repository-host workflow is optional. These local scripts are the source of
@@ -99,18 +105,35 @@ Two matching outputs produced on the same host are necessary but insufficient.
 Before claiming cross-builder reproducibility, compare manifests from at least
 two independent clean hosts using the same declared toolchain/dependency set.
 
+## Format compatibility gate
+
+A release that claims a frozen format must bind its signed tag to the normative
+format document, byte-exact conformance vectors, and the compatibility contract.
+Format v1.0 remains a draft until every freeze criterion in
+`COMPATIBILITY.md` is met.
+
+A release that first writes a newer stable format must additionally test the
+documented `N-1` writer, all frozen historical read fixtures, explicit
+transactional migration, pre-migration backup outside normal retention,
+rollback, and rescue procedures. Ordinary open must remain read-only with
+respect to older formats; unsupported versions must fail closed. Migration or
+rescue artifacts must never contain real credentials.
+
 ## Release gate
 
 1. Run `scripts/check-publication.sh`, confirm the tree is clean, and review
    every staged path.
-2. Confirm the numeric version in CMake, the public header, PKGBUILD, tag, and
-   archive agree; separately confirm the CLI, man page, README, and format
-   documentation use the intended maturity label.
+2. Confirm the application version in CMake, the public header, PKGBUILD, tag,
+   and archive agree; separately confirm the CLI, man page, and README use the
+   intended maturity label and that the declared file-format status/version is
+   accurate.
 3. Run all four CI profiles and the reproducibility check from a clean clone.
 4. Run the extended fuzz campaign and privately resolve every crash.
 5. Exercise init, mutation, backup, password/recovery rotation, and restore with
    synthetic data on a separate machine.
-6. Review `THREAT_MODEL.md`, `SECURITY.md`, dependencies, and format vectors.
+6. Review `THREAT_MODEL.md`, `SECURITY.md`, `FORMAT.md`, `COMPATIBILITY.md`,
+   dependencies, and format vectors. If the release freezes or changes a format,
+   satisfy the format compatibility gate above.
 7. Create a signed annotated tag such as `v0.1.0`.
 8. Generate the source archive from that tag, compute SHA-256, and sign the
    checksum file with the project's published release key.
