@@ -71,10 +71,9 @@ pv_status pv_shell_run(pv_cli_context *const context)
         pv_buffer password = { 0 };
         status = pv_secure_read_secret("Master password: ", &password, false);
         if (status == PV_OK) {
-            status = pv_store_open_password(
+            status = pv_store_open_password_consume(
                 context->config.vault_path,
-                password.data,
-                password.len,
+                &password,
                 &vault,
                 &header
             );
@@ -137,7 +136,7 @@ pv_status pv_shell_run(pv_cli_context *const context)
                 status = pv_clipboard_send(&clipboard, record->password.data, record->password.len);
                 clipboard_ready = false;
                 if (status == PV_OK) {
-                    (void)printf("Password copied; session locks now.\n");
+                    (void)printf("Password queued to the clipboard owner; session locks now.\n");
                 }
                 break;
             }

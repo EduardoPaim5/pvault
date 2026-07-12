@@ -216,6 +216,12 @@ pv_status pv_store_create(
     const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
     pv_vault *vault
 );
+pv_status pv_store_create_consume(
+    const char *path,
+    pv_buffer *password,
+    const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
+    pv_vault *vault
+);
 pv_status pv_store_open_password(
     const char *path,
     const uint8_t *password,
@@ -223,9 +229,21 @@ pv_status pv_store_open_password(
     pv_vault *vault,
     pv_file_header *header
 );
+pv_status pv_store_open_password_consume(
+    const char *path,
+    pv_buffer *password,
+    pv_vault *vault,
+    pv_file_header *header
+);
 pv_status pv_store_open_recovery(
     const char *path,
     const uint8_t recovery_key[PV_RECOVERY_KEY_BYTES],
+    pv_vault *vault,
+    pv_file_header *header
+);
+pv_status pv_store_open_recovery_consume(
+    const char *path,
+    pv_buffer *recovery_key,
     pv_vault *vault,
     pv_file_header *header
 );
@@ -325,6 +343,7 @@ pv_status pv_config_defaults(pv_config *config);
 pv_status pv_secure_read_secret(const char *prompt, pv_buffer *secret, bool confirm);
 pv_status pv_secure_buffer_alloc(pv_buffer *buffer, size_t length);
 pv_status pv_secure_process_hardening(void);
+bool pv_master_password_is_acceptable(const uint8_t *password, size_t password_len);
 void pv_secure_stack_clear(void);
 
 bool pv_size_add(size_t a, size_t b, size_t *out);

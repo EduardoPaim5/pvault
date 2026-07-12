@@ -421,6 +421,93 @@ static void store_rejects_shared_writable_parent_without_chmod(void)
     pv_test_remove_temp_tree(directory);
 }
 
+static bool store_fill_secure_buffer(
+    pv_buffer *const buffer,
+    const uint8_t *const data,
+    const size_t length
+)
+{
+    if (pv_secure_buffer_alloc(buffer, length) != PV_OK) {
+        return false;
+    }
+    memcpy(buffer->data, data, length);
+    buffer->len = length;
+    return true;
+}
+
+static void store_consuming_open_releases_credentials_before_return(void)
+{
+    static const uint8_t password[] = "consuming-open-master";
+    static const uint8_t wrong_password[] = "consuming-open-wrong";
+    uint8_t recovery_key[PV_RECOVERY_KEY_BYTES];
+    char directory[PATH_MAX] = {0};
+    char vault_path[PATH_MAX];
+    char missing_path[PATH_MAX];
+    pv_buffer credential = {0};
+    pv_vault vault = {0};
+    pv_file_header header = {0};
+    pv_status status;
+    size_t index;
+
+    PV_CHECK(pv_test_make_temp_dir(directory, sizeof directory));
+    if (directory[0] == '\0') {
+        return;
+    }
+    PV_CHECK(make_path(vault_path, sizeof vault_path, directory, "consume.pvlt"));
+    PV_CHECK(make_path(missing_path, sizeof missing_path, directory, "missing.pvlt"));
+    for (index = 0U; index < sizeof recovery_key; ++index) {
+        recovery_key[index] = (uint8_t)(0x60U + index);
+    }
+    PV_CHECK(store_fill_secure_buffer(&credential, password, sizeof password - 1U));
+    status = pv_store_create_consume(
+        vault_path,
+        &credential,
+        recovery_key,
+        &vault
+    );
+    PV_CHECK_STATUS(status, PV_OK);
+    PV_CHECK(credential.data == NULL && credential.len == 0U && !credential.secure);
+    pv_model_destroy(&vault);
+    if (status != PV_OK) {
+        sodium_memzero(recovery_key, sizeof recovery_key);
+        pv_test_remove_temp_tree(directory);
+        return;
+    }
+
+    PV_CHECK(store_fill_secure_buffer(&credential, password, sizeof password - 1U));
+    status = pv_store_open_password_consume(vault_path, &credential, &vault, &header);
+    PV_CHECK_STATUS(status, PV_OK);
+    PV_CHECK(credential.data == NULL && credential.len == 0U && !credential.secure);
+    pv_model_destroy(&vault);
+
+    PV_CHECK(store_fill_secure_buffer(
+        &credential,
+        wrong_password,
+        sizeof wrong_password - 1U
+    ));
+    status = pv_store_open_password_consume(vault_path, &credential, &vault, &header);
+    PV_CHECK_STATUS(status, PV_ERR_AUTH);
+    PV_CHECK(credential.data == NULL && credential.len == 0U && !credential.secure);
+    pv_model_destroy(&vault);
+
+    PV_CHECK(store_fill_secure_buffer(&credential, password, sizeof password - 1U));
+    status = pv_store_open_password_consume(missing_path, &credential, &vault, &header);
+    PV_CHECK(status != PV_OK);
+    PV_CHECK(credential.data == NULL && credential.len == 0U && !credential.secure);
+    pv_model_destroy(&vault);
+
+    PV_CHECK(store_fill_secure_buffer(&credential, recovery_key, sizeof recovery_key));
+    status = pv_store_open_recovery_consume(vault_path, &credential, &vault, &header);
+    PV_CHECK_STATUS(status, PV_OK);
+    PV_CHECK(credential.data == NULL && credential.len == 0U && !credential.secure);
+    pv_model_destroy(&vault);
+
+    pv_buffer_secure_free(&credential);
+    sodium_memzero(&header, sizeof header);
+    sodium_memzero(recovery_key, sizeof recovery_key);
+    pv_test_remove_temp_tree(directory);
+}
+
 void pv_test_store_suite(void)
 {
     pv_test_run(
@@ -430,5 +517,9 @@ void pv_test_store_suite(void)
     pv_test_run(
         "store.rejects_shared_writable_parent_without_chmod",
         store_rejects_shared_writable_parent_without_chmod
+    );
+    pv_test_run(
+        "store.consuming_open_releases_credentials_before_return",
+        store_consuming_open_releases_credentials_before_return
     );
 }
