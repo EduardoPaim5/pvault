@@ -9,9 +9,6 @@ static const char recovery_kdf_context[crypto_kdf_CONTEXTBYTES] = { 'P', 'V', 'R
 
 #define PV_PASSWORD_AAD_LEN 76U
 #define PV_RECOVERY_AAD_LEN 44U
-#define PV_MAX_KDF_MEMLIMIT (UINT64_C(1024) * 1024U * 1024U)
-#define PV_MAX_KDF_OPSLIMIT 10U
-
 static void put_u16_le(uint8_t *const out, const uint16_t value)
 {
     out[0] = (uint8_t)value;
@@ -121,17 +118,24 @@ pv_status pv_header_decode(const uint8_t input[PV_FILE_HEADER_LEN], pv_file_head
     }
 
     maximum_ciphertext = (uint64_t)PV_MAX_PLAINTEXT + PV_BODY_TAG_BYTES;
-    if (sodium_memcmp(header->magic, pv_magic, PV_MAGIC_LEN) != 0 || id_aggregate == 0U ||
-        header->major != PV_FILE_MAJOR || header->minor > PV_FILE_MINOR ||
-        header->header_len != PV_FILE_HEADER_LEN || header->flags != 0U ||
+    if (sodium_memcmp(header->magic, pv_magic, PV_MAGIC_LEN) != 0) {
+        sodium_memzero(header, sizeof(*header));
+        return PV_ERR_FORMAT;
+    }
+    /* This is the exact v1.0 decoder; future minors require explicit dispatch. */
+    if (header->major != PV_FILE_MAJOR || header->minor != PV_FILE_MINOR) {
+        sodium_memzero(header, sizeof(*header));
+        return PV_ERR_UNSUPPORTED;
+    }
+    if (id_aggregate == 0U || header->header_len != PV_FILE_HEADER_LEN || header->flags != 0U ||
         header->kdf_id != PV_KDF_ARGON2ID13 ||
         header->wrap_aead_id != PV_AEAD_XCHACHA20POLY1305 ||
         header->body_aead_id != PV_AEAD_XCHACHA20POLY1305 ||
         header->slot_count != 2U ||
-        header->password_slot.opslimit < crypto_pwhash_OPSLIMIT_MIN ||
-        header->password_slot.opslimit > PV_MAX_KDF_OPSLIMIT ||
-        header->password_slot.memlimit < crypto_pwhash_MEMLIMIT_MIN ||
-        header->password_slot.memlimit > PV_MAX_KDF_MEMLIMIT ||
+        header->password_slot.opslimit < PV_V1_PASSWORD_OPSLIMIT_MIN ||
+        header->password_slot.opslimit > PV_V1_PASSWORD_OPSLIMIT_MAX ||
+        header->password_slot.memlimit < PV_V1_PASSWORD_MEMLIMIT_MIN ||
+        header->password_slot.memlimit > PV_V1_PASSWORD_MEMLIMIT_MAX ||
         header->body_ciphertext_len < UINT64_C(4096) + PV_BODY_TAG_BYTES ||
         (header->body_ciphertext_len - PV_BODY_TAG_BYTES) % UINT64_C(4096) != 0U ||
         header->body_ciphertext_len > maximum_ciphertext) {
@@ -164,8 +168,10 @@ static pv_status password_key(
 {
     if (slot == NULL || password == NULL || key == NULL || password_len == 0U ||
         password_len > crypto_pwhash_PASSWD_MAX ||
-        slot->opslimit < crypto_pwhash_OPSLIMIT_MIN || slot->opslimit > PV_MAX_KDF_OPSLIMIT ||
-        slot->memlimit < crypto_pwhash_MEMLIMIT_MIN || slot->memlimit > PV_MAX_KDF_MEMLIMIT) {
+        slot->opslimit < PV_V1_PASSWORD_OPSLIMIT_MIN ||
+        slot->opslimit > PV_V1_PASSWORD_OPSLIMIT_MAX ||
+        slot->memlimit < PV_V1_PASSWORD_MEMLIMIT_MIN ||
+        slot->memlimit > PV_V1_PASSWORD_MEMLIMIT_MAX) {
         return PV_ERR_AUTH;
     }
     if (crypto_pwhash(
@@ -280,8 +286,8 @@ pv_status pv_crypto_rewrap_password(
     if (header == NULL || new_password == NULL || vmk == NULL) {
         return PV_ERR_USAGE;
     }
-    header->password_slot.opslimit = crypto_pwhash_OPSLIMIT_MODERATE;
-    header->password_slot.memlimit = crypto_pwhash_MEMLIMIT_MODERATE;
+    header->password_slot.opslimit = PV_V1_PASSWORD_OPSLIMIT;
+    header->password_slot.memlimit = PV_V1_PASSWORD_MEMLIMIT;
     randombytes_buf(header->password_slot.salt, PV_SALT_BYTES);
     randombytes_buf(header->password_slot.nonce, PV_WRAP_NONCE_BYTES);
     status = secure_key_alloc(&key, PV_WRAP_KEY_BYTES);
