@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -133,6 +135,19 @@ void pv_test_remove_temp_tree(const char *path)
     remove_tree_impl(path);
 }
 
+static void process_hardening_is_active(void)
+{
+    struct rlimit core_limit;
+    const int result = getrlimit(RLIMIT_CORE, &core_limit);
+
+    PV_CHECK(result == 0);
+    if (result == 0) {
+        PV_CHECK(core_limit.rlim_cur == 0U);
+        PV_CHECK(core_limit.rlim_max == 0U);
+    }
+    PV_CHECK(prctl(PR_GET_DUMPABLE) == 0);
+}
+
 int main(void)
 {
     pv_status status;
@@ -143,9 +158,11 @@ int main(void)
         return 1;
     }
 
+    pv_test_run("process.hardening_is_active", process_hardening_is_active);
     pv_test_crypto_suite();
     pv_test_cbor_suite();
     pv_test_compat_suite();
+    pv_test_config_suite();
     pv_test_recovery_suite();
     pv_test_rescue_suite();
     pv_test_store_suite();

@@ -27,6 +27,7 @@ void pv_test_remove_temp_tree(const char *path);
 void pv_test_crypto_suite(void);
 void pv_test_cbor_suite(void);
 void pv_test_compat_suite(void);
+void pv_test_config_suite(void);
 void pv_test_recovery_suite(void);
 void pv_test_rescue_suite(void);
 void pv_test_backup_retention_suite(void);

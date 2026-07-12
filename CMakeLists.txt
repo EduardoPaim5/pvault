@@ -151,6 +151,7 @@ if(BUILD_TESTING)
         tests/test_main.c
         tests/test_cbor.c
         tests/test_compat.c
+        tests/test_config.c
         tests/test_crypto.c
         tests/test_recovery.c
         tests/test_rescue.c
