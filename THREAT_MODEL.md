@@ -19,6 +19,10 @@ PVault treats the following as secrets or integrity-sensitive state:
 - the complete decrypted payload and generated passwords; and
 - the ordering, revision, and deletion state of records.
 
+The configuration is not secret, but it is integrity-sensitive because it
+selects the vault path, retention behavior, clipboard lifetime, session
+timeout, and whether the external rofi picker is used.
+
 The encrypted file's existence, size rounded to its padding boundary, update
 time, backup count, and local pathname are not hidden.
 
@@ -32,9 +36,12 @@ PVault trusts:
 - the current user's account while the vault is unlocked; and
 - the randomness supplied through libsodium.
 
-`xclip`, `wl-copy`, the X11/Wayland compositor, terminal, window manager, and
-clipboard manager are outside the cryptographic core. Once a password is sent
-to the clipboard owner, those components can observe or retain it.
+`xclip`, `wl-copy`, optional `rofi`, the X11/Wayland compositor, terminal,
+window manager, and clipboard manager are outside the cryptographic core. Once
+a password is sent to the clipboard owner, those components can observe or
+retain it. Opting into rofi exposes each displayed record title and hexadecimal
+record identifier to that external process; the in-process picker is the
+default.
 
 ## Adversaries considered
 
@@ -100,6 +107,12 @@ non-minimal encodings.
 This validation also limits denial-of-service from an unauthenticated header:
 the file cannot select arbitrary Argon2 memory/operation costs or force an
 unbounded allocation.
+
+The optional configuration is opened relative to a validated owner-controlled
+directory descriptor. Symlinks, hardlinks, non-regular objects, unsafe owner or
+mode metadata, duplicate keys, embedded NUL bytes, and oversized input fail
+closed. Parsing occurs into a temporary configuration and is committed only
+after the complete file is valid.
 
 ### Memory lifecycle
 
@@ -190,8 +203,20 @@ PVault sends a requested field through an anonymous pipe to a short-lived
 clipboard owner. The owner is started without a shell and the secret is never
 an argument or environment variable. A supervisor expires only the owner it
 created. The owner requests a parent-death signal from the kernel, so abrupt
-supervisor death also terminates it. PVault does not overwrite the clipboard
-with an empty string, because that could erase newer user content.
+supervisor death also terminates it. The inherited signal mask and the
+SIGTERM/SIGINT/SIGHUP/SIGCHLD dispositions are normalized before the worker and
+owner run. A successful transport result means the payload was written to the
+pipe, its write end was closed, the owner was observed alive, and a
+`CLOCK_BOOTTIME` timer was armed; suspend time therefore counts toward the TTL.
+It cannot prove that an external backend consumed the pipe or acquired a usable
+selection, so the CLI describes the value as queued rather than copied. PVault
+does not overwrite the clipboard with an empty string, because that could erase
+newer user content.
+
+Textual UTF-8 values without NUL are offered to Wayland as
+`text/plain;charset=utf-8`; other byte strings use `application/octet-stream`
+so the transport does not falsely label arbitrary vault values as UTF-8. The
+receiving application still decides whether it can consume that MIME type.
 
 Expiration limits how long PVault offers the selection. It cannot revoke a copy
 already requested by an application or clipboard manager. X11 provides no
@@ -202,7 +227,8 @@ therefore remains an acknowledged exposure.
 
 Users are expected to:
 
-- use a strong, unique master password;
+- use a strong, unique, randomly generated master passphrase; the creation-time
+  weak-pattern filter is only a guardrail and not an entropy estimate;
 - verify release signatures/checksums when releases become available;
 - keep the operating system and dependencies updated;
 - use encrypted swap or disable swap and avoid unencrypted hibernation;

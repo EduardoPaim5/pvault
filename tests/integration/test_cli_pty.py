@@ -195,6 +195,7 @@ class CliPtyIntegrationTests(unittest.TestCase):
         environment: dict[str, str],
         current_password: bytes | None = None,
         recovery_file: Path | None = None,
+        expected_returncode: int = 0,
     ) -> bytes:
         if (current_password is None) == (recovery_file is None):
             raise ValueError("select exactly one password-change authentication path")
@@ -220,7 +221,11 @@ class CliPtyIntegrationTests(unittest.TestCase):
             process.expect(b"Confirm: ")
             self.assertFalse(process.echo_enabled())
             process.send_line(new_password)
-            return self.finish_secret_process(process, secrets)
+            return self.finish_secret_process(
+                process,
+                secrets,
+                expected_returncode=expected_returncode,
+            )
 
     def run_recovery_rejected(
         self,
@@ -328,6 +333,77 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assert_secret_absent(record_secret, vault_bytes, "encrypted vault bytes")
             self.assertEqual(0o600, stat.S_IMODE(vault.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(recovery.stat().st_mode))
+
+    def test_master_password_policy_is_shared_by_init_and_passwd(self) -> None:
+        policy_message = (
+            b"master password must be at least 16 bytes and not a common value, "
+            b"full sequence, or periodic repetition; prefer a randomly generated "
+            b"5-6 word passphrase"
+        )
+        rejected_passwords = (
+            b"aB3$dE6&gH9*kL?",
+            b"correcthorsebatterystaple",
+            b"abcdefghijklmnop",
+            b"Ab9!Ab9!Ab9!Ab9!",
+        )
+
+        with tempfile.TemporaryDirectory(prefix="pvault-master-policy-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+
+            for index, password in enumerate(rejected_passwords):
+                with self.subTest(password_class=index):
+                    vault = root / f"rejected-{index}.pvlt"
+                    recovery = root / f"rejected-{index}.txt"
+                    with PtyProcess(
+                        [PVAULT, "--vault", vault, "init", "--recovery-out", recovery],
+                        cwd=REPOSITORY,
+                        env=environment,
+                    ) as process:
+                        process.register_secret(password)
+                        process.expect(b"New master password: ")
+                        self.assertFalse(process.echo_enabled())
+                        process.send_line(password)
+                        process.expect(b"Confirm: ")
+                        self.assertFalse(process.echo_enabled())
+                        process.send_line(password)
+                        output = self.finish_secret_process(
+                            process,
+                            (password,),
+                            expected_returncode=2,
+                        )
+                    self.assertIn(policy_message, output)
+                    self.assertFalse(vault.exists())
+                    self.assertFalse(recovery.exists())
+
+            vault = root / "accepted.pvlt"
+            recovery = root / "accepted-recovery.txt"
+            current_password = b"Random-Master-Passphrase-729!"
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                current_password,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            passwd_output = self.change_master_password(
+                vault,
+                rejected_passwords[1],
+                (current_password, rejected_passwords[1]),
+                environment=environment,
+                current_password=current_password,
+                expected_returncode=2,
+            )
+            self.assertIn(policy_message, passwd_output)
+            self.run_master_authenticated(
+                vault,
+                ("list",),
+                current_password,
+                (current_password,),
+                environment=environment,
+            )
 
     def test_password_change_recovery_rotation_and_recovery_password_change(self) -> None:
         original_master = b"Original-Master-Secret-101!"
@@ -772,6 +848,7 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assertIn(b"Usage: pvault rescue inspect", help_result.stdout)
             for arguments, expected_usage in (
                 (("list", "--help"), b"Usage: pvault [--vault PATH] list [QUERY]"),
+                (("config", "--help"), b"Usage: pvault config check"),
                 (("rescue", "inspect", "--help"), b"Usage: pvault rescue inspect SNAPSHOT"),
                 (
                     ("recovery", "rotate", "--help"),
@@ -811,6 +888,33 @@ class CliPtyIntegrationTests(unittest.TestCase):
             )
             self.assertNotEqual(0, help_as_value_result.returncode)
             self.assertNotIn(b"Usage: pvault copy", help_as_value_result.stdout)
+            invalid_config_check = subprocess.run(
+                [PVAULT, "config", "check"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                cwd=REPOSITORY,
+                timeout=5.0,
+                check=False,
+            )
+            self.assertNotEqual(0, invalid_config_check.returncode)
+            self.assertIn(b"pvault: configuration:", invalid_config_check.stderr)
+            self.assertNotIn(os.fsencode(config_directory), invalid_config_check.stderr)
+            config_path = config_directory / "config"
+            config_path.write_text("clipboard_ttl_seconds=10\n", encoding="ascii")
+            config_path.chmod(0o600)
+            valid_config_check = subprocess.run(
+                [PVAULT, "config", "check"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                cwd=REPOSITORY,
+                timeout=5.0,
+                check=False,
+            )
+            self.assertEqual(0, valid_config_check.returncode, valid_config_check.stderr)
+            self.assertIn(b"Configuration check passed", valid_config_check.stdout)
+            self.assertNotIn(os.fsencode(config_directory), valid_config_check.stdout)
             for secret in all_secrets:
                 self.assert_secret_absent(
                     secret,

@@ -60,6 +60,16 @@ Infraestrutura entregue neste marco:
   ou recovery;
 - restore drill local descartável com canários sintéticos, backup, mutação,
   rescue, verificação pelos dois keyslots e restore em caminho isolado.
+- configuração aberta por descritor e validada quanto a owner, modo, links,
+  tipo, parent, limites, NUL e duplicatas, com parsing transacional e testes
+  contra symlink, hardlink, FIFO e arquivo superdimensionado.
+- política única para novas senhas mestras, com piso de 16 bytes e rejeição de
+  valores comuns, sequências e repetições óbvias; credenciais consumidas e
+  zeradas logo após criação/unwrap, antes do I/O ou parse restante;
+- ACK do clipboard após payload enfileirado, write-end fechado, owner observado
+  vivo e timer suspend-aware armado com `CLOCK_BOOTTIME`, além da normalização
+  de sinais herdados e regressões para owner morto antes/na metade da leitura e
+  parent-death.
 
 Permanecem como gates da fase:
 

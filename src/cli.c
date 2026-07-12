@@ -37,6 +37,20 @@ static bool status_committed(const pv_status status)
     return status == PV_OK || status == PV_ERR_DURABILITY;
 }
 
+static pv_status validate_new_master_password(const pv_buffer *const password)
+{
+    if (password != NULL &&
+        pv_master_password_is_acceptable(password->data, password->len)) {
+        return PV_OK;
+    }
+    (void)fprintf(
+        stderr,
+        "pvault: master password must be at least 16 bytes and not a common value, "
+        "full sequence, or periodic repetition; prefer a randomly generated 5-6 word passphrase\n"
+    );
+    return PV_ERR_USAGE;
+}
+
 static pv_status read_exact(const int fd, void *const output, const size_t length)
 {
     uint8_t *cursor = output;
@@ -125,6 +139,7 @@ static void print_usage(FILE *const stream)
         "                              Create an authenticated recovery copy\n"
         "  rollback SNAPSHOT --output PATH\n"
         "                              Create a separate rollback copy\n"
+        "  config check                Validate configuration and permissions\n"
         "  doctor                      Validate structure and authentication\n"
         "  shell                       Open a five-minute session\n"
     );
@@ -187,6 +202,8 @@ static bool print_command_usage(
         usage = "Usage: pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]\n";
     } else if (strcmp(command, "rollback") == 0 && topic == NULL) {
         usage = "Usage: pvault rollback SNAPSHOT --output PATH [--recovery FILE]\n";
+    } else if (strcmp(command, "config") == 0 && topic == NULL) {
+        usage = "Usage: pvault config check\n";
     }
     if (usage == NULL) {
         return false;
@@ -206,10 +223,9 @@ static pv_status open_password_vault(
 
     status = pv_secure_read_secret("Master password: ", &password, false);
     if (status == PV_OK) {
-        status = pv_store_open_password(
+        status = pv_store_open_password_consume(
             context->config.vault_path,
-            password.data,
-            password.len,
+            &password,
             vault,
             header
         );
@@ -509,16 +525,14 @@ static pv_status command_init(pv_cli_context *const context, const int argc, cha
     if (status == PV_OK) {
         status = pv_secure_read_secret("New master password: ", &password, true);
     }
-    if (status == PV_OK && password.len < 12U) {
-        (void)fprintf(stderr, "pvault: master password must contain at least 12 bytes\n");
-        status = PV_ERR_USAGE;
+    if (status == PV_OK) {
+        status = validate_new_master_password(&password);
     }
     if (status == PV_OK) {
         randombytes_buf(recovery_key.data, recovery_key.len);
-        status = pv_store_create(
+        status = pv_store_create_consume(
             context->config.vault_path,
-            password.data,
-            password.len,
+            &password,
             recovery_key.data,
             &vault
         );
@@ -527,6 +541,7 @@ static pv_status command_init(pv_cli_context *const context, const int argc, cha
             status = PV_OK;
         }
     }
+    pv_buffer_secure_free(&password);
     if (status == PV_OK) {
         status = pv_recovery_encode(
             vault.vault_id,
@@ -553,7 +568,6 @@ static pv_status command_init(pv_cli_context *const context, const int argc, cha
         status = commit_status;
     }
     pv_model_destroy(&vault);
-    pv_buffer_secure_free(&password);
     pv_buffer_secure_free(&recovery_key);
     pv_buffer_secure_free(&recovery_text);
     return status;
@@ -909,7 +923,10 @@ static pv_status command_copy(
     }
     sodium_memzero(&header, sizeof(header));
     if (status == PV_OK) {
-        (void)printf("Copied %s; expires in %u seconds\n", field, ttl);
+        (void)printf(
+            "Requested field queued to the clipboard owner; owner lifetime is at most %u seconds\n",
+            ttl
+        );
     }
     return status;
 }
@@ -1094,7 +1111,12 @@ static pv_status command_generate(const unsigned length, const unsigned ttl)
     }
     pv_buffer_secure_free(&password);
     if (status == PV_OK) {
-        (void)printf("Generated %u-character password; clipboard expires in %u seconds\n", length, ttl);
+        (void)printf(
+            "Generated %u-character password and queued it to the clipboard owner; "
+            "owner lifetime is at most %u seconds\n",
+            length,
+            ttl
+        );
     }
     return status;
 }
@@ -1138,15 +1160,22 @@ static pv_status command_passwd(pv_cli_context *const context, const char *const
             );
         }
         if (status == PV_OK) {
-            status = pv_store_open_recovery(context->config.vault_path, recovery_key.data, &vault, &header);
+            pv_buffer_secure_free(&encoded_recovery);
+            status = pv_store_open_recovery_consume(
+                context->config.vault_path,
+                &recovery_key,
+                &vault,
+                &header
+            );
         }
         sodium_memzero(header_bytes, sizeof(header_bytes));
     }
     if (status == PV_OK) {
         status = pv_secure_read_secret("New master password: ", &new_password, true);
     }
-    if (status == PV_OK && new_password.len < 12U) status = PV_ERR_USAGE;
+    if (status == PV_OK) status = validate_new_master_password(&new_password);
     if (status == PV_OK) status = pv_crypto_rewrap_password(&header, new_password.data, new_password.len, vault.vmk);
+    pv_buffer_secure_free(&new_password);
     if (status == PV_OK) {
         vault.dirty = true;
         status = pv_store_save(&vault, &header, context->config.backup_retention);
@@ -1156,7 +1185,6 @@ static pv_status command_passwd(pv_cli_context *const context, const char *const
     } else if (status == PV_ERR_DURABILITY) {
         (void)printf("Password update reached the vault; verify both old and new passwords\n");
     }
-    pv_buffer_secure_free(&new_password);
     pv_buffer_secure_free(&encoded_recovery);
     pv_buffer_secure_free(&recovery_key);
     if (vault.arena.base != NULL) pv_model_destroy(&vault);
@@ -1241,7 +1269,14 @@ static pv_status command_restore(pv_cli_context *const context, const char *cons
     pv_status status;
 
     status = pv_secure_read_secret("Master password for backup: ", &password, false);
-    if (status == PV_OK) status = pv_store_open_password(backup, password.data, password.len, &verification, &header);
+    if (status == PV_OK) {
+        status = pv_store_open_password_consume(
+            backup,
+            &password,
+            &verification,
+            &header
+        );
+    }
     if (status == PV_OK) {
         (void)printf(
             "Warning: restore rolls back records, the master-password slot, and the recovery-key slot.\n"
@@ -1335,10 +1370,9 @@ static pv_status open_authenticated_snapshot(
     if (status == PV_OK && recovery_file == NULL) {
         status = pv_secure_read_secret("Master password for snapshot: ", &password, false);
         if (status == PV_OK) {
-            status = pv_store_open_password(
+            status = pv_store_open_password_consume(
                 snapshot,
-                password.data,
-                password.len,
+                &password,
                 vault,
                 header
             );
@@ -1363,7 +1397,13 @@ static pv_status open_authenticated_snapshot(
             );
         }
         if (status == PV_OK) {
-            status = pv_store_open_recovery(snapshot, recovery_key.data, vault, header);
+            pv_buffer_secure_free(&encoded_recovery);
+            status = pv_store_open_recovery_consume(
+                snapshot,
+                &recovery_key,
+                vault,
+                header
+            );
         }
     }
     pv_buffer_secure_free(&password);
@@ -1509,6 +1549,22 @@ static pv_status command_doctor(pv_cli_context *const context)
     return status;
 }
 
+static pv_status command_config_check(void)
+{
+    pv_config verified;
+    pv_status status;
+
+    memset(&verified, 0, sizeof(verified));
+    status = pv_config_load(&verified);
+    if (status == PV_OK) {
+        (void)printf(
+            "Configuration check passed (private file or built-in defaults).\n"
+        );
+    }
+    sodium_memzero(&verified, sizeof(verified));
+    return status;
+}
+
 pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
 {
     const char *command;
@@ -1573,6 +1629,10 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
         return print_command_usage(stdout, command, argv[0]) ? PV_OK : PV_ERR_USAGE;
     }
     if (strcmp(command, "init") == 0) return command_init(context, argc, argv);
+    if (strcmp(command, "config") == 0 && argc == 1 &&
+        strcmp(argv[0], "check") == 0) {
+        return command_config_check();
+    }
     if (strcmp(command, "add") == 0 && argc == 0) return command_add(context);
     if (strcmp(command, "edit") == 0 && argc == 1) return command_edit(context, argv[0]);
     if (strcmp(command, "remove") == 0 && argc == 1) return command_remove(context, argv[0]);

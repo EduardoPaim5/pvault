@@ -1,4 +1,4 @@
-.TH PVAULT 1 "2026-07-11" "PVault 0.1.0-pre-alpha" "User Commands"
+.TH PVAULT 1 "2026-07-12" "PVault 0.1.0-pre-alpha" "User Commands"
 .SH NAME
 pvault \- experimental local-first password vault
 .SH SYNOPSIS
@@ -26,7 +26,10 @@ file must not already exist. Move that file to separate offline storage after
 verifying it. If vault creation succeeds but writing the recovery file fails,
 the empty vault is retained; unlock it with the master password and run
 .B recovery rotate --out PATH
-before adding records.
+before adding records. New master passwords must contain at least 16 bytes and
+must not be a recognized common value, full sequence, or periodic repetition.
+This is a guardrail rather than an entropy estimate; prefer a randomly
+generated 5-6 word passphrase.
 .TP
 .B add
 Create a record using the internal terminal form.
@@ -67,6 +70,9 @@ Normally the current master password authenticates the operation. With
 .BR --recovery ,
 read the recovery key from FILE and use it to authorize setting a new master
 password. The recovery key itself is never accepted as an argument.
+The same new-password policy used by
+.B init
+is enforced here.
 .TP
 .B recovery rotate --out PATH
 Generate a new recovery keyslot and write the replacement recovery code to a
@@ -102,6 +108,14 @@ The source and configured active vault are not modified.
 Create the same authenticated, read-only separate copy for application rollback.
 This command never replaces the active vault and is not an in-place format
 downgrade. Use the signed compatible reader against PATH explicitly.
+.TP
+.B config check
+Validate the optional configuration file and its owner, mode, link count,
+regular-file type, immediate parent, size, syntax, duplicate keys, and value
+bounds. A missing file under an absent or valid immediate parent selects the
+built-in defaults; an unsafe existing parent fails closed. No paths or
+configured values are printed. This check runs even when normal commands reject
+the configuration.
 .TP
 .B doctor
 Check file framing and parent, snapshot, and lock metadata, then request the
@@ -193,10 +207,20 @@ as a foreground selection owner. On Wayland it uses
 The helper is executed directly without a shell; the secret travels through an
 anonymous pipe, not an argument or environment variable.
 .PP
-At expiration PVault terminates only the clipboard owner it created. It does not
-copy an empty value, so newer clipboard content is not intentionally erased.
-The owner is also terminated by the kernel if its PVault supervisor dies
-abruptly.
+Wayland values that are valid UTF-8 without NUL use
+.BR text/plain;charset=utf-8 ;
+other byte strings use
+.BR application/octet-stream .
+The receiving application may decline a binary MIME type.
+.PP
+PVault reports a successful transport after the payload is written to the pipe,
+the write end is closed, the owner is observed alive, and the expiration timer
+is armed. This does not prove that the external backend acquired a usable
+selection, so diagnostics say queued rather than copied. The timer includes time
+spent suspended. At expiration PVault terminates only the clipboard owner it
+created. It does not copy an empty value, so newer clipboard content is not
+intentionally erased. The owner is also terminated by the kernel if its PVault
+supervisor dies abruptly.
 Clipboard managers and applications can retain a password after reading it;
 expiration cannot revoke an already consumed copy. X11 clients in the same
 session can request the selection.
@@ -205,8 +229,12 @@ The configuration file is a strict, non-secret file containing one
 .I key=value
 assignment per line. Blank lines and lines whose first non-space character is
 .B #
-are ignored. Unknown keys and invalid values are rejected rather than silently
-ignored. Accepted keys are:
+are ignored. Unknown or duplicate keys, embedded NUL, oversized input, relative
+vault paths, and invalid values are rejected rather than silently ignored. LF
+and CRLF endings are accepted. The complete file is parsed transactionally.
+When present, it must be a current-user-owned regular non-symlink file with one
+hard link and mode 0400 or 0600, below an owner-controlled immediate parent
+that is not group/world writable. Accepted keys are:
 .TP
 .B vault_path=PATH
 Absolute vault path. The default is the XDG data path documented under FILES.
@@ -254,8 +282,9 @@ Vault lock or concurrent-update conflict.
 .B 7
 External integration, such as a clipboard backend, is unavailable.
 .SH SECURITY NOTES
-Use a strong, unique master password and keep the recovery key separate from
-encrypted backups. Prefer encrypted swap and avoid unencrypted hibernation.
+Use a strong, unique, randomly generated master passphrase and keep the recovery
+key separate from encrypted backups. The weak-pattern filter is not an entropy
+estimate. Prefer encrypted swap and avoid unencrypted hibernation.
 Do not use persistent clipboard history for secrets. If an update reports that
 it was committed but durability could not be confirmed, preserve both the old
 and new recovery material and verify the vault before taking another action.
