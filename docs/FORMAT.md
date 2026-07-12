@@ -6,8 +6,10 @@
 
 This document is the normative description of the PVault 1.0 desktop file
 format. The format is not stable before PVault 1.0: pre-alpha builds may reject
-or require migration of files produced by an earlier commit. Published test
-vectors must identify the exact commit that generated them.
+or require migration of files produced by an earlier commit. A published test
+vector manifest must bind itself to digests of this normative document and its
+independent generator/verifier. A signed release binds those artifacts to the
+complete source revision.
 
 The words MUST, MUST NOT, SHOULD, and MAY are used as normative requirements.
 
@@ -125,10 +127,13 @@ crypto_pwhash(
 )
 ```
 
-The initial profile records `opslimit = 3` and `memlimit = 268435456` (256 MiB).
-A build may refuse creation when those resources cannot be securely allocated;
-it MUST NOT silently write different values. Readers validate recorded values
-before invoking `crypto_pwhash`.
+A v1.0 writer records exactly `opslimit = 3` and `memlimit = 268435456`
+(256 MiB). A build may refuse creation when those resources cannot be securely
+allocated; it MUST NOT silently substitute the library's current recommended
+profile. A v1.0 reader accepts recorded operation costs from 3 through 10 and
+memory costs from 268435456 through 1073741824 bytes, validating those numeric
+bounds before invoking `crypto_pwhash`. These bounds are part of the format
+contract, not aliases to mutable libsodium recommendation constants.
 
 The KEK encrypts the 32-byte VMK in combined XChaCha20-Poly1305 mode using
 `password_nonce`. The 48-byte result is stored in `password_wrapped_vmk`.
@@ -426,3 +431,14 @@ The repository's binary vectors should cover at least:
 
 Test vectors contain synthetic secrets only and are not evidence of production
 security.
+
+The current draft's representative deterministic fixture, canonical manifest,
+and independent Python implementation are committed as
+`tests/compat/pvault-v1-synthetic.bin`,
+`tests/compat/pvault-v1-synthetic.json`, and
+`tests/compat/pvault_v1_vector.py`. The manifest records SHA-256 digests of this
+normative document and independent implementation. `tests/test_compat.c`
+separately proves that the PVault C reader consumes the same fixed bytes,
+reconstructs the expected semantic record, and writes the same canonical CBOR
+and recovery text. This representative fixture does not by itself satisfy every
+format-freeze criterion in `COMPATIBILITY.md`.

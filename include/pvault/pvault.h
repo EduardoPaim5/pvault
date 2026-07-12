@@ -36,7 +36,8 @@ typedef enum pv_status {
     PV_ERR_EXISTS,
     PV_ERR_STATE,
     PV_ERR_DURABILITY,
-    PV_ERR_NOMEM
+    PV_ERR_NOMEM,
+    PV_ERR_UNSUPPORTED
 } pv_status;
 
 typedef struct pv_buffer {

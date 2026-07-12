@@ -961,7 +961,7 @@ static pv_status wait_for_setup(int fd, struct pv_clip_setup_result *result)
         result->worker_pid > (int64_t)INT_MAX) {
         return PV_ERR_FORMAT;
     }
-    if (result->status < (int32_t)PV_OK || result->status > (int32_t)PV_ERR_NOMEM) {
+    if (result->status < (int32_t)PV_OK || result->status > (int32_t)PV_ERR_UNSUPPORTED) {
         return PV_ERR_FORMAT;
     }
     return (pv_status)result->status;

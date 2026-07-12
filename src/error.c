@@ -31,6 +31,8 @@ const char *pv_status_string(const pv_status status)
         return "update committed, but durability could not be confirmed";
     case PV_ERR_NOMEM:
         return "out of memory";
+    case PV_ERR_UNSUPPORTED:
+        return "unsupported or corrupted vault format version";
     }
     return "unknown error";
 }
@@ -44,6 +46,7 @@ int pv_status_exit_code(const pv_status status)
         return 2;
     case PV_ERR_AUTH:
     case PV_ERR_FORMAT:
+    case PV_ERR_UNSUPPORTED:
         return 3;
     case PV_ERR_IO:
     case PV_ERR_DURABILITY:

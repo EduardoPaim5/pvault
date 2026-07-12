@@ -2,7 +2,7 @@
 
 ## Fase 1 — Fundação criptográfica e formato (concluída)
 
-- formato v1 fixo e documentado;
+- formato v1.0 candidato, serializado explicitamente e documentado;
 - Argon2id, VMK aleatória, dois keyslots e XChaCha20-Poly1305;
 - arena segura, page locking, limpeza garantida e limites rígidos;
 - CBOR determinístico, testes negativos e fuzzers;
@@ -44,7 +44,9 @@ Infraestrutura entregue neste marco:
   round-trip, TTL e parent-death de `/usr/bin/xclip` real sem tocar no
   clipboard da sessão do usuário;
 - comparação automatizada de duas árvores de instalação Release independentes;
-- procedimento documentado de release, assinatura, checksums e reprodução.
+- procedimento documentado de release, assinatura, checksums e reprodução;
+- contrato documentado (ainda não implementação) para tratamento fail-closed,
+  congelamento do v1.0, futura migração transacional, rollback e rescue.
 
 Permanecem como gates da fase:
 
@@ -57,7 +59,9 @@ Permanecem como gates da fase:
 - campanhas longas de fuzzing, minimização e triagem privada dos artefatos;
 - reprodução cruzada em duas máquinas e toolchains independentes;
 - publicação efetiva de release assinada e checksum real no PKGBUILD;
-- política de migração do formato e restauração ensaiada com dados sintéticos.
+- congelamento do formato v1.0 com vetores independentes e implementação testada
+  do contrato de migração/rescue;
+- restauração ensaiada com dados sintéticos.
 
 Gate: não recomendar credenciais reais antes de corrigir achados da auditoria e
 executar recuperação periódica de snapshots em uma máquina separada.

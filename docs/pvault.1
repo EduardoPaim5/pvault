@@ -189,7 +189,7 @@ Success.
 Invalid command or option.
 .TP
 .B 3
-Authentication or integrity failure.
+Authentication, integrity, malformed-format, or unsupported-version failure.
 .TP
 .B 4
 Input/output failure.
@@ -220,7 +220,10 @@ See
 .I THREAT_MODEL.md
 and
 .I docs/FORMAT.md
-in the source distribution for the complete design boundary and file format.
+and
+.I docs/COMPATIBILITY.md
+in the source distribution for the complete design boundary, file format, and
+migration policy.
 .SH BUGS
 Report ordinary bugs through the project issue tracker using synthetic data.
 Follow

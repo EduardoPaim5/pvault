@@ -145,6 +145,7 @@ int main(void)
 
     pv_test_crypto_suite();
     pv_test_cbor_suite();
+    pv_test_compat_suite();
     pv_test_recovery_suite();
     pv_test_store_suite();
 #ifdef PVAULT_TEST_FAULT_INJECTION

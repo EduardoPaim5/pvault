@@ -46,6 +46,8 @@ static void crypto_fixture_setup(void)
     PV_CHECK(fixture_header.kdf_id == PV_KDF_ARGON2ID13);
     PV_CHECK(fixture_header.wrap_aead_id == PV_AEAD_XCHACHA20POLY1305);
     PV_CHECK(fixture_header.body_aead_id == PV_AEAD_XCHACHA20POLY1305);
+    PV_CHECK(fixture_header.password_slot.opslimit == PV_V1_PASSWORD_OPSLIMIT);
+    PV_CHECK(fixture_header.password_slot.memlimit == PV_V1_PASSWORD_MEMLIMIT);
     fixture_ready = true;
 }
 
@@ -142,6 +144,10 @@ static void crypto_body_roundtrip_authenticates_ciphertext_and_aad(void)
     PV_CHECK(ciphertext.data != NULL);
     PV_CHECK(ciphertext.len == 4096U + PV_BODY_TAG_BYTES);
     PV_CHECK(header.body_ciphertext_len == ciphertext.len);
+    if (ciphertext.data == NULL || ciphertext.len == 0U) {
+        pv_buffer_secure_free(&ciphertext);
+        return;
+    }
 
     status = pv_crypto_decrypt_body(
         &header,
@@ -342,12 +348,96 @@ static void header_codec_roundtrips_and_rejects_invalid_preamble(void)
     invalid[8] = (uint8_t)(PV_FILE_MAJOR + 1U);
     invalid[9] = 0U;
     status = pv_header_decode(invalid, &decoded);
-    PV_CHECK(status == PV_ERR_FORMAT);
+    PV_CHECK(status == PV_ERR_UNSUPPORTED);
+
+    (void)memcpy(invalid, encoded, sizeof invalid);
+    invalid[10] = (uint8_t)(PV_FILE_MINOR + 1U);
+    invalid[11] = 0U;
+    status = pv_header_decode(invalid, &decoded);
+    PV_CHECK(status == PV_ERR_UNSUPPORTED);
 
     (void)memcpy(invalid, encoded, sizeof invalid);
     (void)memset(invalid + 52U, 0xff, 8U);
     status = pv_header_decode(invalid, &decoded);
     PV_CHECK(status == PV_ERR_FORMAT);
+}
+
+static void status_mapping_distinguishes_unsupported_format(void)
+{
+    PV_CHECK(
+        strcmp(
+            pv_status_string(PV_ERR_UNSUPPORTED),
+            "unsupported or corrupted vault format version"
+        ) == 0
+    );
+    PV_CHECK(pv_status_exit_code(PV_ERR_UNSUPPORTED) == 3);
+}
+
+static pv_status header_status_with_kdf_costs(const uint64_t opslimit, const uint64_t memlimit)
+{
+    uint8_t encoded[PV_FILE_HEADER_LEN];
+    pv_file_header header;
+    pv_file_header decoded;
+    pv_status status;
+
+    header = fixture_header;
+    header.body_ciphertext_len = 4096U + PV_BODY_TAG_BYTES;
+    header.password_slot.opslimit = opslimit;
+    header.password_slot.memlimit = memlimit;
+    status = pv_header_encode(&header, encoded);
+    if (status == PV_OK) {
+        status = pv_header_decode(encoded, &decoded);
+    }
+    sodium_memzero(&decoded, sizeof decoded);
+    sodium_memzero(&header, sizeof header);
+    sodium_memzero(encoded, sizeof encoded);
+    return status;
+}
+
+static void header_kdf_numeric_boundaries_are_explicit(void)
+{
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MIN,
+            PV_V1_PASSWORD_MEMLIMIT_MIN
+        ),
+        PV_OK
+    );
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MAX,
+            PV_V1_PASSWORD_MEMLIMIT_MAX
+        ),
+        PV_OK
+    );
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MIN - 1U,
+            PV_V1_PASSWORD_MEMLIMIT_MIN
+        ),
+        PV_ERR_FORMAT
+    );
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MAX + 1U,
+            PV_V1_PASSWORD_MEMLIMIT_MIN
+        ),
+        PV_ERR_FORMAT
+    );
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MIN,
+            PV_V1_PASSWORD_MEMLIMIT_MIN - 1U
+        ),
+        PV_ERR_FORMAT
+    );
+    PV_CHECK_STATUS(
+        header_status_with_kdf_costs(
+            PV_V1_PASSWORD_OPSLIMIT_MIN,
+            PV_V1_PASSWORD_MEMLIMIT_MAX + 1U
+        ),
+        PV_ERR_FORMAT
+    );
 }
 
 void pv_test_crypto_suite(void)
@@ -369,6 +459,14 @@ void pv_test_crypto_suite(void)
     pv_test_run(
         "header.codec_roundtrips_and_rejects_invalid_preamble",
         header_codec_roundtrips_and_rejects_invalid_preamble
+    );
+    pv_test_run(
+        "status.mapping_distinguishes_unsupported_format",
+        status_mapping_distinguishes_unsupported_format
+    );
+    pv_test_run(
+        "header.kdf_numeric_boundaries_are_explicit",
+        header_kdf_numeric_boundaries_are_explicit
     );
 
     sodium_memzero(fixture_recovery, sizeof fixture_recovery);
