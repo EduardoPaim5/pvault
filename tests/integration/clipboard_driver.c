@@ -40,6 +40,22 @@ static int read_secret(unsigned char *buffer, size_t capacity, size_t *length)
     return -1;
 }
 
+static const char *sigchld_state(void)
+{
+    struct sigaction action;
+
+    if (sigaction(SIGCHLD, NULL, &action) != 0) {
+        return "error";
+    }
+    if (action.sa_handler == SIG_IGN) {
+        return "ignored";
+    }
+    if (action.sa_handler == SIG_DFL) {
+        return "default";
+    }
+    return "handler";
+}
+
 int main(int argc, char **argv)
 {
     pv_clipboard_job job;
@@ -66,6 +82,7 @@ int main(int argc, char **argv)
         return pv_status_exit_code(status);
     }
     (void)printf("SUPERVISOR %ld\n", (long)job.supervisor_pid);
+    (void)printf("CALLER_SIGCHLD %s\n", sigchld_state());
     (void)fflush(stdout);
 
     if (strcmp(argv[1], "cancel") == 0) {
