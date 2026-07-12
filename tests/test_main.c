@@ -147,6 +147,7 @@ int main(void)
     pv_test_cbor_suite();
     pv_test_compat_suite();
     pv_test_recovery_suite();
+    pv_test_rescue_suite();
     pv_test_store_suite();
     pv_test_store_security_suite();
     pv_test_backup_retention_suite();
