@@ -423,6 +423,14 @@ the authenticated candidate ID, and MUST preserve the pre-restore state first.
 This lineage guard does not authenticate the active snapshot. Cross-vault
 import is not an implicit restore operation.
 
+An authenticated rescue or application-rollback copy MUST preserve the exact
+encrypted header and body, publish only to a non-existing separate path, use a
+private temporary file and atomic no-replace rename, synchronize the file and
+directory, and verify the installed bytes by readback. PVault publishes such a
+copy as mode 0400 so ordinary save cannot mutate it in place. Structural rescue
+inspection does not authenticate any declared header value and MUST NOT supply
+the authenticated hash capability used by the recovery-copy operation.
+
 PVault-created snapshots use mode 0600. Readers may also accept 0400 for an
 explicitly read-only copy; group/world access, executable or special mode bits,
 foreign ownership, multiple hard links, non-regular objects, symlinks, and an

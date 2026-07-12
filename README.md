@@ -121,6 +121,7 @@ truth:
 ./scripts/fuzz-smoke.sh
 ./scripts/reproducible-build.sh
 ./scripts/check-publication.sh
+./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh       # optional; requires Xvfb
 ```
 
@@ -128,6 +129,11 @@ The fuzz script keeps synthetic corpora and private failure artifacts under the
 Git-ignored `.cache/fuzz/` directory. Never seed it with a real vault. See
 [`docs/RELEASES.md`](docs/RELEASES.md) for the release gates and exact
 reproducibility boundary.
+
+`restore-drill.sh` creates only synthetic canaries under a disposable mode-0700
+directory. It exercises authenticated backup, post-backup mutation, read-only
+rescue copy, password/recovery verification, and restore into a separate path;
+it fails unless the active vault remains byte-exact throughout rescue.
 
 CTest also runs Linux integration coverage with a real controlling PTY and
 deterministic fake X11/Wayland clipboard owners; it does not require an active
@@ -157,6 +163,10 @@ pvault passwd [--recovery FILE]
 pvault recovery rotate --out PATH
 pvault backup --output PATH
 pvault restore PATH
+pvault rescue inspect SNAPSHOT
+pvault rescue verify SNAPSHOT [--recovery FILE]
+pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]
+pvault rollback SNAPSHOT --output PATH [--recovery FILE]
 pvault doctor
 pvault shell
 ```
@@ -182,6 +192,24 @@ active vault exists, its vault ID must match the authenticated backup;
 cross-vault replacement requires a future explicit import workflow. The active
 ID is the declared cleartext header value, so this lineage guard does not prove
 that a damaged active snapshot can still authenticate.
+
+`rescue inspect` performs framing and private-file checks only. Every value it
+prints is explicitly marked unauthenticated. `rescue verify` requires either a
+master password from the TTY or a recovery file, authenticates the complete
+AEAD body, parses canonical CBOR, and prints only version, vault ID, generation,
+record count, and the encrypted snapshot hash. It never prints record fields.
+
+`rescue recover` authenticates first, then publishes a byte-exact encrypted copy
+at a new path with no-replace semantics, mode 0400, file/directory `fsync()`, and
+readback verification. `rollback` is the same safe copy primitive with
+application-rollback wording: it never replaces the active vault. Use `restore`
+only for the separate, explicit operation that rolls the active data back.
+
+There is intentionally no cross-version migration command yet. Format 1.0 is
+the first and only implemented format; rewriting 1.0 as 1.0 would be a repack,
+not a migration. A real migrator will ship with the first specified successor
+format and will require its own N-1 fixture, transactional backup, recovery-key
+policy, and lossless transformation tests.
 
 ### i3 example
 

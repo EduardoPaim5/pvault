@@ -1131,7 +1131,8 @@ static pv_status write_snapshot_exclusive_at(
     const char *const name,
     const uint8_t header[PV_FILE_HEADER_LEN],
     const uint8_t *const ciphertext,
-    const size_t ciphertext_len
+    const size_t ciphertext_len,
+    const mode_t final_mode
 )
 {
     char temporary[PATH_MAX];
@@ -1142,7 +1143,7 @@ static pv_status write_snapshot_exclusive_at(
     unsigned attempt;
 
     if (directory_fd < 0 || name == NULL || header == NULL || ciphertext == NULL ||
-        ciphertext_len == 0U) {
+        ciphertext_len == 0U || (final_mode != 0400 && final_mode != 0600)) {
         return PV_ERR_USAGE;
     }
     for (attempt = 0U; attempt < 32U; ++attempt) {
@@ -1195,6 +1196,9 @@ static pv_status write_snapshot_exclusive_at(
         }
     }
     if (status == PV_OK) status = write_all(fd, ciphertext, ciphertext_len);
+    if (status == PV_OK && fchmod(fd, final_mode) != 0) {
+        status = PV_ERR_IO;
+    }
     if (status == PV_OK && (fstat(fd, &output_stat) != 0 ||
             private_snapshot_stat_issue(&output_stat) != PV_PRIVATE_SNAPSHOT_OK)) {
         status = PV_ERR_IO;
@@ -1237,7 +1241,8 @@ static pv_status write_snapshot_exclusive(
     const char *const destination,
     const uint8_t header[PV_FILE_HEADER_LEN],
     const uint8_t *const ciphertext,
-    const size_t ciphertext_len
+    const size_t ciphertext_len,
+    const mode_t final_mode
 )
 {
     pv_store_location location;
@@ -1252,7 +1257,8 @@ static pv_status write_snapshot_exclusive(
         location.name,
         header,
         ciphertext,
-        ciphertext_len
+        ciphertext_len,
+        final_mode
     );
     if (status == PV_OK && revalidate_store_location(destination, &location) != PV_OK) {
         status = PV_ERR_DURABILITY;
@@ -1658,7 +1664,8 @@ static pv_status automatic_backup(
         backup_name,
         snapshot->header_bytes,
         snapshot->ciphertext,
-        snapshot->ciphertext_len
+        snapshot->ciphertext_len,
+        0600
     );
     if (status == PV_ERR_DURABILITY) {
         status = PV_ERR_IO;
@@ -2004,6 +2011,63 @@ pv_status pv_store_save(pv_vault *const vault, pv_file_header *const header, con
     return status;
 }
 
+static pv_status write_exact_snapshot_copy(
+    const pv_disk_file *const source,
+    const char *const output_path,
+    const mode_t final_mode
+)
+{
+    pv_status status;
+    bool published;
+
+    if (source == NULL || output_path == NULL ||
+        (final_mode != 0400 && final_mode != 0600)) {
+        return PV_ERR_USAGE;
+    }
+    status = write_snapshot_exclusive(
+        output_path,
+        source->header_bytes,
+        source->ciphertext,
+        source->ciphertext_len,
+        final_mode
+    );
+    published = status == PV_OK || status == PV_ERR_DURABILITY;
+    if (published) {
+        pv_disk_file recovered;
+        pv_status readback_status;
+
+#ifdef PVAULT_TEST_FAULT_INJECTION
+        if (store_fault_point_triggered(PV_STORE_FAULT_POINT_SNAPSHOT_READBACK)) {
+            readback_status = PV_ERR_IO;
+        } else
+#endif
+        {
+            readback_status = read_disk_file(output_path, &recovered);
+        }
+
+        if (readback_status != PV_OK || recovered.ciphertext_len != source->ciphertext_len ||
+            sodium_memcmp(
+                recovered.header_bytes,
+                source->header_bytes,
+                sizeof source->header_bytes
+            ) != 0 || sodium_memcmp(
+                recovered.ciphertext,
+                source->ciphertext,
+                source->ciphertext_len
+            ) != 0 || sodium_memcmp(
+                recovered.hash,
+                source->hash,
+                sizeof source->hash
+            ) != 0 || (recovered.snapshot_stat.st_mode & 07777) != final_mode) {
+            status = PV_ERR_DURABILITY;
+        }
+        if (readback_status == PV_OK) {
+            disk_file_destroy(&recovered);
+        }
+    }
+    return status;
+}
+
 pv_status pv_store_backup(
     const char *const vault_path,
     const char *const output_path,
@@ -2021,13 +2085,57 @@ pv_status pv_store_backup(
         disk_file_destroy(&disk);
         return PV_ERR_AUTH;
     }
-    status = write_snapshot_exclusive(
-        output_path,
-        disk.header_bytes,
-        disk.ciphertext,
-        disk.ciphertext_len
-    );
+    status = write_exact_snapshot_copy(&disk, output_path, 0600);
     disk_file_destroy(&disk);
+    return status;
+}
+
+pv_status pv_store_inspect(
+    const char *const path,
+    pv_file_header *const header,
+    size_t *const ciphertext_len
+)
+{
+    pv_disk_file disk;
+    pv_status status;
+
+    if (path == NULL || header == NULL || ciphertext_len == NULL) {
+        return PV_ERR_USAGE;
+    }
+    sodium_memzero(header, sizeof(*header));
+    *ciphertext_len = 0U;
+    status = read_disk_file(path, &disk);
+    if (status != PV_OK) {
+        return status;
+    }
+    *header = disk.header;
+    *ciphertext_len = disk.ciphertext_len;
+    disk_file_destroy(&disk);
+    return PV_OK;
+}
+
+pv_status pv_store_recover_authenticated(
+    const char *const snapshot_path,
+    const char *const output_path,
+    const uint8_t expected_hash[crypto_generichash_BYTES]
+)
+{
+    pv_disk_file source;
+    pv_status status;
+
+    if (snapshot_path == NULL || output_path == NULL || expected_hash == NULL) {
+        return PV_ERR_USAGE;
+    }
+    status = read_disk_file(snapshot_path, &source);
+    if (status != PV_OK) {
+        return status;
+    }
+    if (sodium_memcmp(source.hash, expected_hash, sizeof source.hash) != 0) {
+        disk_file_destroy(&source);
+        return PV_ERR_AUTH;
+    }
+    status = write_exact_snapshot_copy(&source, output_path, 0400);
+    disk_file_destroy(&source);
     return status;
 }
 

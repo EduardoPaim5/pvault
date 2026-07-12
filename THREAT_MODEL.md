@@ -162,6 +162,28 @@ The recovery file is not a backup of the vault. It is an alternate secret that
 unlocks a surviving encrypted snapshot. Users must keep both encrypted backups
 and the recovery key, preferably in separate offline locations.
 
+### Rescue and application rollback
+
+Rescue is not a permissive parser or repair mode. Structural inspection labels
+the declared header values unauthenticated and never parses the body. Verification
+requires a password or recovery key, successful keyslot unlock, complete body
+AEAD authentication, canonical CBOR, and semantic validation before reporting
+authenticated metadata. It never emits plaintext records.
+
+Authenticated recovery and application rollback publish a byte-exact encrypted
+copy to a new, non-existing path. The temporary file is private, synchronized,
+changed to mode 0400 before an atomic no-replace rename, synchronized through
+the parent directory, and verified by readback. The source and configured active
+vault are never written, renamed, chmodded, pruned, or removed. A hash proves
+byte equality only; the recovery API accepts a hash obtained from a prior
+authenticated open and structural inspection does not expose that value.
+
+PVault never edits magic/version bytes, skips AEAD, imports a partial payload,
+or exports plaintext as a rescue technique. Unsupported or corrupted versions
+remain fail-closed. Cross-version migration will not exist until a real
+successor format has an explicit decoder, writer, conformance fixture, recovery
+credential policy, and lossless transactional route.
+
 ### Clipboard
 
 PVault sends a requested field through an anonymous pipe to a short-lived

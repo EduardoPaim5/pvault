@@ -31,6 +31,7 @@ truth and can run on a self-hosted runner or another forge:
 ./scripts/fuzz-smoke.sh
 ./scripts/reproducible-build.sh
 ./scripts/check-publication.sh
+./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh
 ```
 
@@ -129,8 +130,9 @@ rescue artifacts must never contain real credentials.
    accurate.
 3. Run all four CI profiles and the reproducibility check from a clean clone.
 4. Run the extended fuzz campaign and privately resolve every crash.
-5. Exercise init, mutation, backup, password/recovery rotation, and restore with
-   synthetic data on a separate machine.
+5. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
+   password/recovery rotation, rescue/rollback copy, and restore with synthetic
+   data on a separate machine.
 6. Review `THREAT_MODEL.md`, `SECURITY.md`, `FORMAT.md`, `COMPATIBILITY.md`,
    dependencies, and format vectors. If the release freezes or changes a format,
    satisfy the format compatibility gate above.

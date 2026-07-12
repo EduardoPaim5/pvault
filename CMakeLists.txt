@@ -153,6 +153,7 @@ if(BUILD_TESTING)
         tests/test_compat.c
         tests/test_crypto.c
         tests/test_recovery.c
+        tests/test_rescue.c
         tests/test_backup_retention.c
         tests/test_store.c
         tests/test_store_faults.c
@@ -209,6 +210,21 @@ if(BUILD_TESTING)
         set_tests_properties(
             pvault_integration_tests
             PROPERTIES DEPENDS pvault_tests LABELS integration TIMEOUT 120
+        )
+        add_test(
+            NAME pvault_restore_drill
+            COMMAND
+                ${CMAKE_COMMAND} -E env
+                "PVAULT_BUILD_DIR=$<TARGET_FILE_DIR:pvault>"
+                "PYTHONDONTWRITEBYTECODE=1"
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/restore-drill.sh
+        )
+        set_tests_properties(
+            pvault_restore_drill
+            PROPERTIES
+                DEPENDS pvault_tests
+                LABELS "integration;recovery;restore-drill"
+                TIMEOUT 90
         )
     endif()
 

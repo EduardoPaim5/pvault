@@ -130,6 +130,14 @@ file, and ship a signed isolated rescue reader or migrator when safely possible.
 The release is not allowed to make the only remaining authenticated copy
 unreadable. Compatibility must never override fail-closed validation.
 
+For the migration/rescue portion of the current v1-only freeze criteria, the
+required gate is authenticated rescue, an application-rollback copy, and a
+restore drill. This does not replace or weaken any of the cumulative items 1-6
+above; all remain mandatory before v1.0 is frozen. A v1-to-v1 rewrite is not
+called migration and is not used to satisfy this contract. The first release
+that writes a successor format must add the transactional migration route, N-1
+fixture, and recovery-key handling required above.
+
 ## Application rollback and format downgrade
 
 Rolling back an application is not the same as downgrading a vault. An older
@@ -161,7 +169,9 @@ signed artifacts:
 - a tested path to create a new encrypted vault when in-place migration cannot
   complete safely.
 
-Rescue always operates on a private copy. It must not weaken version checks,
-skip AEAD verification, expose plaintext by default, or make the only surviving
-snapshot writable. Users must retain the recovery key, authenticated encrypted
-snapshots, and the signed reader needed for each format on which they depend.
+Rescue always operates on a private local snapshot and never mutates its input.
+Recovery and rollback outputs are separate read-only copies. Rescue must not
+weaken version checks, skip AEAD verification, expose plaintext by default, or
+make the only surviving snapshot writable. Users must retain the recovery key,
+authenticated encrypted snapshots, and the signed reader needed for each format
+on which they depend.
