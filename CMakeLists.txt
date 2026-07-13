@@ -27,12 +27,20 @@ option(
     OFF
 )
 option(
+    PVAULT_BUILD_LIVE_X11_CANARY
+    "Build the manual, never-CI live i3/X11 clipboard canary"
+    OFF
+)
+option(
     PVAULT_BUILD_WAYLAND_SYSTEM_TESTS
     "Characterize the non-installable experimental wl-copy backend on disposable Wayland"
     OFF
 )
 if(PVAULT_BUILD_X11_SYSTEM_TESTS AND NOT BUILD_TESTING)
     message(FATAL_ERROR "PVAULT_BUILD_X11_SYSTEM_TESTS requires BUILD_TESTING=ON")
+endif()
+if(PVAULT_BUILD_LIVE_X11_CANARY AND NOT BUILD_TESTING)
+    message(FATAL_ERROR "PVAULT_BUILD_LIVE_X11_CANARY requires BUILD_TESTING=ON")
 endif()
 if(PVAULT_BUILD_WAYLAND_SYSTEM_TESTS AND NOT BUILD_TESTING)
     message(FATAL_ERROR "PVAULT_BUILD_WAYLAND_SYSTEM_TESTS requires BUILD_TESTING=ON")
@@ -499,16 +507,17 @@ if(BUILD_TESTING)
         )
     endif()
 
-    if(PVAULT_BUILD_X11_SYSTEM_TESTS)
+    if(PVAULT_BUILD_X11_SYSTEM_TESTS OR PVAULT_BUILD_LIVE_X11_CANARY)
         if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            message(FATAL_ERROR "PVAULT_BUILD_X11_SYSTEM_TESTS currently requires Linux")
+            message(FATAL_ERROR "X11 clipboard test targets currently require Linux")
         endif()
         if(NOT EXISTS "/usr/bin/xclip")
-            message(FATAL_ERROR "PVAULT_BUILD_X11_SYSTEM_TESTS requires /usr/bin/xclip")
+            message(FATAL_ERROR "X11 clipboard test targets require /usr/bin/xclip")
         endif()
-        find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
-        find_program(PVAULT_XVFB_EXECUTABLE NAMES Xvfb REQUIRED)
         pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+        if(PVAULT_BUILD_LIVE_X11_CANARY)
+            pkg_check_modules(XRES REQUIRED IMPORTED_TARGET xres)
+        endif()
 
         add_executable(
             pvault_x11_clipboard_driver
@@ -520,6 +529,10 @@ if(BUILD_TESTING)
             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
         )
         target_link_libraries(pvault_x11_clipboard_driver PRIVATE pvault_core)
+        target_compile_definitions(
+            pvault_x11_clipboard_driver
+            PRIVATE PVAULT_INSTALLABLE_CLIPBOARD
+        )
         pvault_warnings(pvault_x11_clipboard_driver)
 
         add_executable(
@@ -527,6 +540,13 @@ if(BUILD_TESTING)
             tests/system/x11_selection_owner.c
         )
         target_link_libraries(pvault_x11_selection_owner PRIVATE PkgConfig::X11)
+        if(PVAULT_BUILD_LIVE_X11_CANARY)
+            target_link_libraries(pvault_x11_selection_owner PRIVATE PkgConfig::XRES)
+            target_compile_definitions(
+                pvault_x11_selection_owner
+                PRIVATE PVAULT_X11_OWNER_PID_QUERY
+            )
+        endif()
         pvault_warnings(pvault_x11_selection_owner)
 
         if(PVAULT_ENABLE_HARDENING)
@@ -563,20 +583,24 @@ if(BUILD_TESTING)
             endforeach()
         endif()
 
-        add_test(
-            NAME pvault_x11_system_tests
-            COMMAND
-                ${CMAKE_COMMAND} -E env
-                "PVAULT_X11_DRIVER=$<TARGET_FILE:pvault_x11_clipboard_driver>"
-                "PVAULT_X11_OWNER_QUERY=$<TARGET_FILE:pvault_x11_selection_owner>"
-                "PVAULT_XVFB=${PVAULT_XVFB_EXECUTABLE}"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/system/test_xclip_x11.py
-        )
-        set_tests_properties(
-            pvault_x11_system_tests
-            PROPERTIES LABELS "system;real-clipboard;x11" TIMEOUT 45
-        )
+        if(PVAULT_BUILD_X11_SYSTEM_TESTS)
+            find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+            find_program(PVAULT_XVFB_EXECUTABLE NAMES Xvfb REQUIRED)
+            add_test(
+                NAME pvault_x11_system_tests
+                COMMAND
+                    ${CMAKE_COMMAND} -E env
+                    "PVAULT_X11_DRIVER=$<TARGET_FILE:pvault_x11_clipboard_driver>"
+                    "PVAULT_X11_OWNER_QUERY=$<TARGET_FILE:pvault_x11_selection_owner>"
+                    "PVAULT_XVFB=${PVAULT_XVFB_EXECUTABLE}"
+                    ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/system/test_xclip_x11.py
+            )
+            set_tests_properties(
+                pvault_x11_system_tests
+                PROPERTIES LABELS "system;real-clipboard;x11" TIMEOUT 45
+            )
+        endif()
     endif()
 
     if(PVAULT_BUILD_WAYLAND_SYSTEM_TESTS)
