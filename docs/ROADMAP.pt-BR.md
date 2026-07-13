@@ -31,6 +31,10 @@ equivale a auditoria nem torna o software adequado para credenciais reais.
 Infraestrutura entregue neste marco:
 
 - scripts locais para GCC, Clang, ASan/UBSan, Release e instalação de teste;
+- perfil Clang LSan standalone em container isolado, com hardening do processo
+  preservado, controle negativo obrigatório, logs por PID para workers
+  destacados, contabilização test-only do allocator protegido da libsodium e
+  rejeição de processos residuais;
 - workflow hospedado opcional que chama os mesmos scripts locais;
 - smoke fuzz limitado, seeds sintéticos e corpus persistente privado por target;
 - fault injection determinística por etapa de commit, backup e restore, além de
@@ -55,7 +59,9 @@ Infraestrutura entregue neste marco:
   e backups, readback pós-commit e recusa de sobrescrever arquivo não-PVault em
   `restore`, incluindo recusa de troca implícita entre linhagens de cofre;
 - retenção automática isolada por cofre, com AEAD/CBOR e geração autenticada,
-  pinning 0400 e falha conservadora antes de qualquer poda suspeita;
+  pinning 0400 e falha conservadora antes de qualquer poda suspeita; cada
+  varredura abre uma descrição independente do diretório validado, sem
+  reutilizar cursor compartilhado entre gerações;
 - `rescue inspect/verify/recover` e rollback-copy separados do cofre ativo,
   com publicação 0400 no-replace, readback byte-exato e autenticação por senha
   ou recovery;
@@ -71,6 +77,11 @@ Infraestrutura entregue neste marco:
   vivo e timer suspend-aware armado com `CLOCK_BOOTTIME`, além da normalização
   de sinais herdados e regressões para owner morto antes/na metade da leitura e
   parent-death;
+- `SIGCHLD` normalizado no início do CLI para que estado ignorado/bloqueado
+  herdado não invalide wait/reap de subprocessos; helpers continuam a
+  normalizar seu próprio estado;
+- fault injection para colisão idempotente seguida de falha no `fsync`, com
+  liberação incondicional do snapshot carregado e retry sem perda;
 - contrato de CLI queryless para `edit`, `remove`, `show` e `copy`, com seleção
   pelo picker interno em vez de título, username, URL, tag ou ID persistente em
   `argv`;

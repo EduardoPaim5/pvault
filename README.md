@@ -103,8 +103,17 @@ handling. The `asan-ubsan` test preset and the default `ci-build.sh sanitize`
 invocation disable LeakSanitizer because managed test environments may deny the
 `ptrace` operation it needs. `ci-build.sh` preserves a caller-supplied
 `ASAN_OPTIONS`; custom options must include `detect_leaks=0` to retain that
-default. Leak checks remain required before release and must run separately on
-a `ptrace`-capable host, with test-process hardening adjusted only for that run.
+default. The separate `ci-build.sh lsan` profile uses standalone Clang LSan,
+keeps `RLIMIT_CORE=0` and `PR_SET_DUMPABLE=0`, and therefore requires an
+isolated test environment with `CAP_SYS_PTRACE`. Its negative controls must
+detect intentional ordinary-heap and guarded-allocator leaks before the real
+suite is accepted. The hosted job
+grants that capability only inside its disposable LSan container. Test-only
+linker wrappers also require every application-visible
+`sodium_malloc` to have a matching `sodium_free`, because LSan does not reliably
+track libsodium's guarded allocator. No production target or ordinary CI job
+receives either exception or wrapper, and CMake refuses to install an LSan
+profile.
 
 To install into a staging directory:
 
@@ -119,6 +128,7 @@ truth:
 
 ```sh
 ./scripts/ci-build.sh all
+./scripts/ci-build.sh lsan      # isolated CAP_SYS_PTRACE test environment
 ./scripts/fuzz-smoke.sh
 ./scripts/reproducible-build.sh
 ./scripts/check-publication.sh

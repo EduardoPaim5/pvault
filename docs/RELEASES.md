@@ -27,6 +27,7 @@ truth and can run on a self-hosted runner or another forge:
 ./scripts/ci-build.sh gcc
 ./scripts/ci-build.sh clang
 ./scripts/ci-build.sh sanitize
+./scripts/ci-build.sh lsan
 ./scripts/ci-build.sh release
 ./scripts/fuzz-smoke.sh
 ./scripts/reproducible-build.sh
@@ -35,12 +36,24 @@ truth and can run on a self-hosted runner or another forge:
 ./scripts/test-real-x11.sh
 ```
 
-`ci-build.sh all` runs the four build profiles sequentially. The build/test and
-reproducibility scripts require Python 3.10 or newer because the CTest
-integration suite drives PTYs and mock clipboard processes without requiring a
-real X11 or Wayland display. The reproducibility and archive procedures also
-require Git. Creating signed tags and checksum files requires GnuPG; it is not a
-normal build dependency.
+`ci-build.sh all` runs the four ordinary build profiles sequentially. The
+standalone `lsan` profile is deliberately separate because it requires
+`CAP_SYS_PTRACE` while the tested process remains non-dumpable. The hosted job
+grants that capability only in its disposable, synthetic-data LSan container.
+The profile has negative controls
+that must report intentional ordinary-heap and guarded-allocator leaks,
+captures reports from detached workers by
+PID, rejects leftover test processes, checks the balance of guarded
+`sodium_malloc` allocations with test-only linker wrappers, and accepts no
+non-empty report from the real suite. A native invocation without the required
+capability fails before building, and CMake refuses to install this test-only
+profile.
+
+The build/test and reproducibility scripts require Python 3.10 or newer because
+the CTest integration suite drives PTYs and mock clipboard processes without
+requiring a real X11 or Wayland display. The reproducibility and archive
+procedures also require Git. Creating signed tags and checksum files requires
+GnuPG; it is not a normal build dependency.
 
 The last command is an opt-in X11 system test and requires `Xvfb` (the
 `xorg-server-xvfb` package on Arch). It starts a private display and invokes the
@@ -54,9 +67,10 @@ independent of the repository host so equivalent runners can call them later.
 The CMake sanitizer test preset and the default `ci-build.sh sanitize`
 invocation disable LeakSanitizer in the normal hardened test process.
 `ci-build.sh` preserves a caller-supplied `ASAN_OPTIONS`, so a custom value must
-include `detect_leaks=0` to retain that default. Before a release, run a separate
-leak check on a trusted host that permits the required tracing and use synthetic
-fixtures only.
+include `detect_leaks=0` to retain that default. Before a release, run
+`ci-build.sh lsan` in the isolated environment described above and use
+synthetic fixtures only. The LSan profile preserves process hardening; the
+capability belongs to the test container rather than to the PVault executable.
 
 ## Fuzz state
 
@@ -128,7 +142,8 @@ rescue artifacts must never contain real credentials.
    and archive agree; separately confirm the CLI, man page, and README use the
    intended maturity label and that the declared file-format status/version is
    accurate.
-3. Run all four CI profiles and the reproducibility check from a clean clone.
+3. Run all four ordinary CI profiles, the standalone LSan profile, and the
+   reproducibility check from a clean clone.
 4. Run the extended fuzz campaign and privately resolve every crash.
 5. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
    password/recovery rotation, rescue/rollback copy, and restore with synthetic
