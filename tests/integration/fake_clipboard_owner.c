@@ -205,6 +205,57 @@ static const char *argument_shape(const int argc, char **const argv)
     return "unexpected";
 }
 
+static int run_clear(const char *const home)
+{
+    char pid_path[PATH_MAX];
+    char result_path[PATH_MAX];
+    char ready_path[PATH_MAX];
+    char started_path[PATH_MAX];
+    char failed_path[PATH_MAX];
+    char fail_mode_path[PATH_MAX];
+    char hang_mode_path[PATH_MAX];
+    char text[512];
+
+    if (make_path(pid_path, home, "clear.pid") != 0 ||
+        make_path(result_path, home, "clear-result.json") != 0 ||
+        make_path(ready_path, home, "cleared.ready") != 0 ||
+        make_path(started_path, home, "clear-started.ready") != 0 ||
+        make_path(failed_path, home, "clear-failed.ready") != 0 ||
+        make_path(fail_mode_path, home, "mode-clear-fail") != 0 ||
+        make_path(hang_mode_path, home, "mode-clear-hang") != 0 ||
+        make_path(signal_path, home, "clear-signal.txt") != 0) {
+        return 126;
+    }
+    (void)snprintf(text, sizeof(text), "%ld\n", (long)getpid());
+    if (write_file(pid_path, text) != 0 || append_invocation(home) != 0) {
+        return 126;
+    }
+    (void)snprintf(
+        text,
+        sizeof(text),
+        "{\"argument_shape\":\"wayland-clear\","
+        "\"forbidden_canary_present\":%s,\"sigchld_default\":%s,"
+        "\"sigterm_blocked\":%s}\n",
+        forbidden_canary_present() ? "true" : "false",
+        sigchld_is_default() ? "true" : "false",
+        signal_is_blocked(SIGTERM) ? "true" : "false"
+    );
+    if (write_file(result_path, text) != 0) {
+        return 126;
+    }
+    if (access(fail_mode_path, F_OK) == 0) {
+        (void)write_file(failed_path, "yes\n");
+        return 126;
+    }
+    if (access(hang_mode_path, F_OK) == 0) {
+        if (install_signal_handlers() != 0 || write_file(started_path, "yes\n") != 0) {
+            return 126;
+        }
+        for (;;) pause();
+    }
+    return write_file(ready_path, "yes\n") == 0 ? 0 : 126;
+}
+
 int main(int argc, char **argv)
 {
     const char *home = getenv("HOME");
@@ -226,8 +277,13 @@ int main(int argc, char **argv)
     bool in_environment;
     bool in_cmdline;
 
-    if (home == NULL || home[0] != '/' ||
-        make_path(owner_path, home, "owner.pid") != 0 ||
+    if (home == NULL || home[0] != '/') {
+        return 126;
+    }
+    if (argc == 2 && strcmp(argv[1], "--clear") == 0) {
+        return run_clear(home);
+    }
+    if (make_path(owner_path, home, "owner.pid") != 0 ||
         make_path(supervisor_path, home, "supervisor.pid") != 0 ||
         make_path(result_path, home, "result.json") != 0 ||
         make_path(ready_path, home, "received.ready") != 0 ||

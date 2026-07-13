@@ -207,6 +207,7 @@ def isolated_x11_server() -> Iterator[X11Context]:
                 "PATH": "/usr/bin:/bin",
                 "XAUTHORITY": str(authority),
                 "XDG_RUNTIME_DIR": str(runtime),
+                "XDG_SESSION_TYPE": "x11",
             }
             for name in ("ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS"):
                 value = os.environ.get(name)

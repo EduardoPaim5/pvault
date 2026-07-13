@@ -2,7 +2,8 @@
 
 PVault is an experimental, local-first password vault for Linux, written in
 C11. It is designed for a keyboard-driven workflow: a terminal interface,
-an in-process picker, and short-lived clipboard ownership on X11 or Wayland.
+an in-process picker, and short-lived clipboard ownership on native X11. The
+installable binaries do not provide a Wayland clipboard backend.
 
 > [!CAUTION]
 > PVault is pre-alpha software. It has not received an independent security
@@ -48,7 +49,6 @@ Runtime:
 - libcbor 0.14.0 or newer
 - ncursesw
 - `xclip` on X11
-- `wl-clipboard` on Wayland (optional)
 - `rofi` for the opt-in external picker (optional)
 
 Build:
@@ -67,15 +67,24 @@ On Arch Linux:
 sudo pacman -S --needed base-devel cmake ninja pkgconf libsodium libcbor ncurses xclip python git gnupg
 ```
 
-For Wayland and the optional picker:
+For the optional picker:
 
 ```sh
-sudo pacman -S --needed wl-clipboard rofi
+sudo pacman -S --needed rofi
 ```
 
 The opt-in system test with a real X11 server and real `xclip` additionally
 requires `xorg-server-xvfb`. It runs on a disposable display and never touches
 the user's current clipboard.
+
+The testing-only Wayland characterization additionally requires `weston` and
+`wl-clipboard`. These are not runtime dependencies. The harness starts a
+headless disposable compositor and never connects to the user's current
+Wayland session:
+
+```sh
+sudo pacman -S --needed weston wl-clipboard
+```
 
 ## Build and test
 
@@ -134,6 +143,7 @@ truth:
 ./scripts/check-publication.sh
 ./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh       # optional; requires Xvfb
+./scripts/test-real-wayland.sh   # experimental characterization; not installable support
 ```
 
 The fuzz script keeps synthetic corpora and private failure artifacts under the
@@ -155,6 +165,15 @@ The separate real-X11 suite is enabled only with
 `-DPVAULT_BUILD_X11_SYSTEM_TESTS=ON`. See
 [`tests/system/README.md`](tests/system/README.md) for its isolation and threat
 boundary.
+
+The separate real-Wayland suite is enabled only with
+`-DPVAULT_BUILD_WAYLAND_SYSTEM_TESTS=ON`. It builds non-installable experimental
+targets and runs real `wl-copy`/`wl-paste` against headless Weston with
+synthetic canaries. A green result deliberately characterizes the unsafe
+boundary: Weston can retain and return the canary bytes after owner exit and a
+clear request. It therefore does not certify Wayland support, cleanup, or
+revocation. Destroying the disposable compositor removes test state as harness
+cleanup; it is not a PVault security property.
 
 ## Command-line interface
 
@@ -224,6 +243,29 @@ The internal picker is the default. Opting into `--rofi` or configuring
 token for that invocation, never the persistent record ID. Rofi is executed
 with an allowlisted display/runtime/authentication/locale environment; it is
 still an external process that can observe every displayed title.
+
+The installable clipboard path supports `xclip` only when `WAYLAND_DISPLAY` is
+empty, `XDG_SESSION_TYPE` is exactly `x11`, and `DISPLAY` is non-empty. Unknown
+or missing session metadata fails closed. The direct `copy` and `pick --copy`
+flows apply this gate before receiving or decrypting the master password;
+`generate` applies it before generating a value. Thus a normal Wayland session
+does not silently fall back through XWayland. PVault cannot authenticate what
+server a forged `DISPLAY` or spoofed environment identifies; changing these
+indicators to bypass the gate is unsupported. Native X11 under i3 is the
+current documented path for initial desktop evaluation.
+
+`shell` probes the clipboard backend before unlock, but an unavailable backend
+does not prevent a read-only interactive session from opening. Its internal
+`copy` action remains unavailable and no secret is sent to a Wayland or
+XWayland owner.
+
+The `wl-copy` owner and best-effort clear implementation is compiled only into
+explicit experimental test targets that CMake does not install. The Weston
+characterization reproduces retention of the synthetic bytes after owner exit
+and a clear request. Its green status records that limitation; it is not a
+claim that the clipboard was erased or revoked. Even on X11, a client or
+clipboard manager can retain a value it has already requested, so TTL limits
+ownership rather than providing strong revocation.
 
 `passwd` normally authenticates with the current master password. With
 `--recovery FILE`, it reads the recovery key from FILE and allows a new master

@@ -80,6 +80,79 @@ class CliPtyIntegrationTests(unittest.TestCase):
         self.assertEqual(expected_returncode, returncode, safe_output)
         return safe_output
 
+    def test_installable_clipboard_commands_refuse_wayland_before_unlock(self) -> None:
+        master = b"Wayland-Policy-Master-Secret-123!"
+
+        with tempfile.TemporaryDirectory(prefix="pvault-wayland-policy-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            environment["DISPLAY"] = ":pvault-xwayland-policy"
+            cases = (
+                (["copy"], "wayland-pvault-policy", None),
+                (["pick", "--copy"], None, "wayland"),
+                (["generate"], "wayland-pvault-policy", "wayland"),
+            )
+            for arguments, wayland_display, session_type in cases:
+                with self.subTest(command=arguments[0]):
+                    command_environment = environment.copy()
+                    if wayland_display is not None:
+                        command_environment["WAYLAND_DISPLAY"] = wayland_display
+                    if session_type is not None:
+                        command_environment["XDG_SESSION_TYPE"] = session_type
+                    completed = subprocess.run(
+                        [PVAULT, "--vault", vault, *arguments],
+                        cwd=REPOSITORY,
+                        env=command_environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=10.0,
+                        check=False,
+                    )
+                    output = completed.stdout + completed.stderr
+
+                    self.assertEqual(7, completed.returncode)
+                    self.assertIn(
+                        b"Wayland and XWayland are refused",
+                        output,
+                    )
+                    self.assertNotIn(b"Master password:", output)
+                    self.assert_secret_absent(
+                        master,
+                        output,
+                        "Wayland policy diagnostics",
+                    )
+
+            shell_environment = environment.copy()
+            shell_environment["WAYLAND_DISPLAY"] = "wayland-pvault-policy"
+            shell_environment["XDG_SESSION_TYPE"] = "wayland"
+            with PtyProcess(
+                [PVAULT, "--vault", vault, "shell"],
+                cwd=REPOSITORY,
+                env=shell_environment,
+            ) as process:
+                self.register_secrets(process, (master,))
+                process.expect(b"Master password: ")
+                self.assertFalse(process.echo_enabled())
+                process.send_line(master)
+                process.expect(b"PVault session open")
+                process.send_line(b"copy synthetic-missing-record")
+                process.expect(b"Clipboard backend unavailable for this session.")
+                process.send_line(b"quit")
+                self.finish_secret_process(process, (master,))
+
     def run_master_authenticated(
         self,
         vault: Path,
@@ -571,6 +644,7 @@ class CliPtyIntegrationTests(unittest.TestCase):
             root.chmod(0o700)
             environment = isolated_environment(root)
             environment["DISPLAY"] = ":99"
+            environment["XDG_SESSION_TYPE"] = "x11"
             vault = root / "vault.pvlt"
             recovery = root / "recovery.txt"
             home = Path(environment["HOME"])

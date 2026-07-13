@@ -34,6 +34,7 @@ truth and can run on a self-hosted runner or another forge:
 ./scripts/check-publication.sh
 ./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh
+./scripts/test-real-wayland.sh  # experimental characterization only
 ```
 
 `ci-build.sh all` runs the four ordinary build profiles sequentially. The
@@ -55,9 +56,26 @@ requiring a real X11 or Wayland display. The reproducibility and archive
 procedures also require Git. Creating signed tags and checksum files requires
 GnuPG; it is not a normal build dependency.
 
-The last command is an opt-in X11 system test and requires `Xvfb` (the
-`xorg-server-xvfb` package on Arch). It starts a private display and invokes the
-real `/usr/bin/xclip`; it does not connect to the user's current X11 session.
+The last two commands are opt-in clipboard system tests. The X11 test requires
+`Xvfb` (the `xorg-server-xvfb` package on Arch), starts a private display, and
+invokes the real `/usr/bin/xclip`. This is the only clipboard backend compiled
+into the installable binaries. It is admitted only with empty
+`WAYLAND_DISPLAY`, exact `XDG_SESSION_TYPE=x11`, and non-empty `DISPLAY`;
+unknown session metadata fails closed. Direct `copy`/`pick --copy` apply this
+before unlock and `generate` before generation. `shell` may still unlock for
+read-only work, but its copy action remains unavailable and sends no secret.
+The policy trusts these environment indicators and does not authenticate the X
+server behind a spoofed `DISPLAY`.
+
+The Wayland command is testing-only. It requires Weston and `wl-clipboard`,
+builds explicit non-installable experimental targets, and invokes real
+`wl-copy` and `wl-paste` discovered at configure time inside a headless disposable
+compositor. A green result reproduces retention of the synthetic canary bytes
+after owner exit and a clear request. It therefore records why the backend is
+not shipped; it does not certify cleanup, revocation, or Wayland support.
+Destroying Weston removes the isolated test state as harness cleanup, not as a
+PVault guarantee. Neither test connects to the user's display session, and all
+payloads are synthetic.
 
 The checked-in hosted workflow currently covers x86-64 Arch Linux with glibc.
 It does not claim ARM64, musl, another distribution, or another kernel. Those
@@ -142,8 +160,10 @@ rescue artifacts must never contain real credentials.
    and archive agree; separately confirm the CLI, man page, and README use the
    intended maturity label and that the declared file-format status/version is
    accurate.
-3. Run all four ordinary CI profiles, the standalone LSan profile, and the
-   reproducibility check from a clean clone.
+3. Run all four ordinary CI profiles, the standalone LSan profile, the X11
+   system test, the non-installable Wayland characterization, and the
+   reproducibility check from a clean clone. Treat a green Weston result as
+   reproduction of the known retention boundary, never as release support.
 4. Run the extended fuzz campaign and privately resolve every crash.
 5. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
    password/recovery rotation, rescue/rollback copy, and restore with synthetic

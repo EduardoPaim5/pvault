@@ -76,6 +76,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
             "-std=c11",
             "-D_GNU_SOURCE",
             "-D_POSIX_C_SOURCE=200809L",
+            "-DPVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD",
             f'-DPV_XCLIP_PATH="{cls.fake_owner}"',
             f'-DPV_WL_COPY_PATH="{cls.fake_owner}"',
             "-Wall",
@@ -223,6 +224,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
                 environment[name] = value
         if backend == "x11":
             environment["DISPLAY"] = ":pvault-integration"
+            environment["XDG_SESSION_TYPE"] = "x11"
         elif backend == "wayland":
             environment["WAYLAND_DISPLAY"] = "wayland-pvault-integration"
             environment["XDG_RUNTIME_DIR"] = str(control)
@@ -243,10 +245,13 @@ class ClipboardIntegrationTests(unittest.TestCase):
         ttl: int,
         secret: bytes,
         *,
+        clear_mode: str | None = None,
         early_exit: bool = False,
         poisoned_signals: bool = False,
     ) -> tuple[Path, int, bytes]:
         control = self._control(f"{backend}-")
+        if clear_mode is not None:
+            (control / clear_mode).touch(mode=0o600)
         if early_exit:
             (control / "exit-after-read").touch(mode=0o600)
         environment = self._environment(control, backend)
@@ -340,6 +345,49 @@ class ClipboardIntegrationTests(unittest.TestCase):
         self.owner_starttimes[owner] = starttime
         return owner
 
+    def _assert_wayland_clear_completed(
+        self,
+        control: Path,
+        owner: int,
+        supervisor: int,
+    ) -> None:
+        wait_until(lambda: (control / "cleared.ready").exists(), 3.0, "Wayland clear")
+        self.assertEqual(
+            owner,
+            int((control / "owner.pid").read_text(encoding="ascii").strip()),
+        )
+        self.assertEqual(
+            supervisor,
+            int((control / "supervisor.pid").read_text(encoding="ascii").strip()),
+        )
+        clear_result = json.loads(
+            (control / "clear-result.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("wayland-clear", clear_result["argument_shape"])
+        self.assertFalse(clear_result["forbidden_canary_present"])
+        self.assertTrue(clear_result["sigchld_default"])
+        self.assertFalse(clear_result["sigterm_blocked"])
+        self.assertEqual(2, len((control / "invocations.log").read_text().splitlines()))
+
+    def _assert_owner_exit_early_does_not_clear(self, backend: str) -> None:
+        secret = b"EARLY-EXIT-CLIPBOARD-SECRET"
+        started = time.monotonic()
+        control, supervisor, _ = self._send_secret(
+            backend,
+            20,
+            secret,
+            early_exit=True,
+        )
+        owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
+        wait_until(lambda: not pid_exists(owner), 3.0, "early owner exit")
+        wait_until(lambda: not pid_exists(supervisor), 3.0, "early supervisor exit")
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertTrue((control / "exited-early").exists())
+        self.assertEqual(1, len((control / "invocations.log").read_text().splitlines()))
+        self.assertFalse((control / "cleared.ready").exists())
+        self.assertFalse((control / "clear-result.json").exists())
+        self.assertFalse((control / "signal.txt").exists())
+
     def test_x11_secret_uses_pipe_and_timeout_reaps_owner_and_supervisor(self) -> None:
         secret = b"X11-CLIPBOARD-SECRET-DO-NOT-LOG"
         started = time.monotonic()
@@ -353,10 +401,17 @@ class ClipboardIntegrationTests(unittest.TestCase):
 
     def test_wayland_arguments_environment_and_timeout(self) -> None:
         secret = b"WAYLAND-CLIPBOARD-SECRET-DO-NOT-LOG"
-        control, supervisor, _ = self._send_secret("wayland", 1, secret)
+        control, supervisor, output = self._send_secret(
+            "wayland",
+            1,
+            secret,
+            poisoned_signals=True,
+        )
+        self.assertIn(b"CALLER_SIGCHLD ignored", output)
         owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
         wait_until(lambda: not pid_exists(owner), 4.0, "Wayland owner timeout")
         wait_until(lambda: not pid_exists(supervisor), 4.0, "Wayland supervisor exit")
+        self._assert_wayland_clear_completed(control, owner, supervisor)
 
     def test_wayland_binary_secret_uses_octet_stream_without_truncation(self) -> None:
         secret = b"\x00WAYLAND-BINARY-SECRET\xff\x00"
@@ -368,6 +423,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
         )
         wait_until(lambda: not pid_exists(owner), 4.0, "Wayland binary owner timeout")
         wait_until(lambda: not pid_exists(supervisor), 4.0, "Wayland binary supervisor exit")
+        self._assert_wayland_clear_completed(control, owner, supervisor)
 
     def test_wayland_invalid_utf8_without_nul_uses_octet_stream(self) -> None:
         secret = b"WAYLAND-INVALID-UTF8-\xff-\xfe"
@@ -379,6 +435,7 @@ class ClipboardIntegrationTests(unittest.TestCase):
         )
         wait_until(lambda: not pid_exists(owner), 4.0, "invalid UTF-8 owner timeout")
         wait_until(lambda: not pid_exists(supervisor), 4.0, "invalid UTF-8 supervisor exit")
+        self._assert_wayland_clear_completed(control, owner, supervisor)
 
     def test_wayland_multibyte_utf8_without_nul_remains_text(self) -> None:
         secret = "senha-✓-🔐".encode("utf-8")
@@ -386,18 +443,47 @@ class ClipboardIntegrationTests(unittest.TestCase):
         owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
         wait_until(lambda: not pid_exists(owner), 4.0, "UTF-8 text owner timeout")
         wait_until(lambda: not pid_exists(supervisor), 4.0, "UTF-8 text supervisor exit")
+        self._assert_wayland_clear_completed(control, owner, supervisor)
 
-    def test_owner_exit_early_does_not_spawn_a_clear_operation(self) -> None:
-        secret = b"EARLY-EXIT-CLIPBOARD-SECRET"
-        started = time.monotonic()
-        control, supervisor, _ = self._send_secret("x11", 20, secret, early_exit=True)
-        owner = int((control / "owner.pid").read_text(encoding="ascii").strip())
-        wait_until(lambda: not pid_exists(owner), 3.0, "early owner exit")
-        wait_until(lambda: not pid_exists(supervisor), 3.0, "early supervisor exit")
-        self.assertLess(time.monotonic() - started, 5.0)
-        self.assertTrue((control / "exited-early").exists())
-        self.assertEqual(1, len((control / "invocations.log").read_text().splitlines()))
-        self.assertFalse((control / "signal.txt").exists())
+    def test_wayland_clear_failure_still_reaps_owner_and_supervisor(self) -> None:
+        secret = b"WAYLAND-CLEAR-FAILURE-SECRET"
+        control, supervisor, _ = self._send_secret(
+            "wayland",
+            1,
+            secret,
+            clear_mode="mode-clear-fail",
+        )
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
+        wait_until(lambda: (control / "clear-failed.ready").exists(), 4.0, "failed clear")
+        wait_until(lambda: not pid_exists(owner), 4.0, "owner after failed clear")
+        wait_until(lambda: not pid_exists(supervisor), 4.0, "supervisor after failed clear")
+        self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
+        self.assertEqual(2, len((control / "invocations.log").read_text().splitlines()))
+
+    def test_wayland_hung_clear_is_bounded_and_reaped(self) -> None:
+        secret = b"WAYLAND-HUNG-CLEAR-SECRET"
+        control, supervisor, _ = self._send_secret(
+            "wayland",
+            1,
+            secret,
+            clear_mode="mode-clear-hang",
+        )
+        owner = self._assert_owner_metadata_is_secret_free(control, secret, "wayland")
+        wait_until(lambda: (control / "clear-started.ready").exists(), 4.0, "hung clear")
+        wait_until(lambda: not pid_exists(owner), 5.0, "owner after hung clear")
+        wait_until(lambda: not pid_exists(supervisor), 5.0, "supervisor after hung clear")
+        self.assertIn(
+            "SIGTERM",
+            (control / "clear-signal.txt").read_text(encoding="ascii"),
+        )
+        self.assertIn("SIGTERM", (control / "signal.txt").read_text(encoding="ascii"))
+        self.assertEqual(2, len((control / "invocations.log").read_text().splitlines()))
+
+    def test_x11_owner_exit_early_does_not_spawn_a_clear_operation(self) -> None:
+        self._assert_owner_exit_early_does_not_clear("x11")
+
+    def test_wayland_owner_exit_early_does_not_spawn_a_clear_operation(self) -> None:
+        self._assert_owner_exit_early_does_not_clear("wayland")
 
     def test_owner_exit_without_reading_fails_closed(self) -> None:
         self._send_secret_expect_failure("mode-exit-without-read", "exited-without-read")

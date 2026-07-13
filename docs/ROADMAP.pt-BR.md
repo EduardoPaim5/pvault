@@ -15,7 +15,8 @@ limites e serialização determinística passam em GCC, Clang, ASan e UBSan.
 
 - `init`, `add`, `edit`, `remove`, `list`, `show` e `copy`;
 - gerador de senha, picker ncurses e integração opcional com rofi;
-- clipboard X11/Wayland com TTL sem bloquear o terminal;
+- clipboard X11 nativo com TTL sem bloquear o terminal e recusa fail-closed de
+  sessões Wayland, sem fallback XWayland;
 - troca de senha, rotação de recovery, backup, restore, doctor e shell;
 - configuração XDG, man page e pacote Arch local.
 
@@ -42,12 +43,16 @@ Infraestrutura entregue neste marco:
   autenticada do snapshot esperado;
 - testes com PTY controlador real para entrada oculta e restauração do terminal
   em `SIGINT/SIGHUP/SIGQUIT/SIGTERM/SIGTSTP`;
-- testes determinísticos dos caminhos X11/Wayland do clipboard com owner falso,
-  transporte por pipe, ambiente filtrado, TTL, `SIGPIPE` e morte abrupta do
-  supervisor sem deixar owner órfão;
+- testes determinísticos do caminho X11 e de targets Wayland experimentais não
+  instaláveis, com owner falso, transporte por pipe, ambiente filtrado, TTL,
+  `SIGPIPE` e morte abrupta do supervisor sem deixar owner órfão;
 - harness opt-in em `Xvfb` descartável, exercitado com repetição, para validar
   round-trip, TTL e parent-death de `/usr/bin/xclip` real sem tocar no
   clipboard da sessão do usuário;
+- harness de caracterização opt-in com Weston headless descartável e targets
+  não instaláveis de `wl-copy`/`wl-paste`; o resultado verde reproduz retenção
+  dos bytes sintéticos após saída do owner e clear, portanto não certifica
+  suporte nem revogação. Destruir o compositor é cleanup do próprio harness;
 - comparação automatizada de duas árvores de instalação Release independentes;
 - procedimento documentado de release, assinatura, checksums e reprodução;
 - contrato documentado para tratamento fail-closed, congelamento do v1.0,
@@ -77,6 +82,13 @@ Infraestrutura entregue neste marco:
   vivo e timer suspend-aware armado com `CLOCK_BOOTTIME`, além da normalização
   de sinais herdados e regressões para owner morto antes/na metade da leitura e
   parent-death;
+- gate compilado: o backend exige `WAYLAND_DISPLAY` vazio,
+  `XDG_SESSION_TYPE=x11` e `DISPLAY` não vazio; metadados ausentes/desconhecidos
+  falham fechados. `copy`/`pick --copy` aplicam o gate antes do unlock e
+  `generate` antes da geração. O `shell` ainda abre para leitura, mas seu
+  `copy` falha; a classificação confia no ambiente e não autentica o servidor;
+- o owner/clear Wayland permanece apenas como experimento não instalável; sua
+  retenção observada no Weston impede promovê-lo a funcionalidade do produto;
 - `SIGCHLD` normalizado no início do CLI para que estado ignorado/bloqueado
   herdado não invalide wait/reap de subprocessos; helpers continuam a
   normalizar seu próprio estado;
@@ -101,8 +113,8 @@ um destino não-TTY e assume suas permissões, logs e retenção.
 Permanecem como gates da fase:
 
 - auditoria independente do formato, parser, memória e processos;
-- acrescentar cobertura equivalente para `wl-copy` em uma sessão Wayland
-  descartável;
+- redesenhar a integração Wayland antes de qualquer habilitação em produção; o
+  experimento atual e seu teste verde não satisfazem cleanup ou revogação;
 - ensaio manual separado do `xclip` dentro do i3, com confirmação explícita de
   que o clipboard ativo será substituído;
 - CI em arquiteturas e libcs diferentes;

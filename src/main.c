@@ -5,6 +5,36 @@
 #include <string.h>
 #include <sys/stat.h>
 
+static bool command_requests_clipboard(const int argc, char **const argv)
+{
+    int position = 1;
+    int index;
+    const char *command;
+
+    if (argv == NULL || argc <= position) {
+        return false;
+    }
+    if (argc > position + 1 && strcmp(argv[position], "--vault") == 0) {
+        position += 2;
+    }
+    if (argc <= position) {
+        return false;
+    }
+    command = argv[position];
+    if (strcmp(command, "copy") == 0 || strcmp(command, "generate") == 0) {
+        return true;
+    }
+    if (strcmp(command, "pick") != 0) {
+        return false;
+    }
+    for (index = position + 1; index < argc; ++index) {
+        if (strcmp(argv[index], "--copy") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool command_ignores_config(const int argc, char **const argv)
 {
     int position = 1;
@@ -99,6 +129,13 @@ int main(int argc, char **argv)
     if (status != PV_OK) {
         if (configuration_error || config_check) {
             report_configuration_error(status);
+        } else if (status == PV_ERR_EXTERNAL && command_requests_clipboard(argc, argv)) {
+            (void)fprintf(
+                stderr,
+                "pvault: clipboard unavailable: require xclip, empty WAYLAND_DISPLAY, "
+                "XDG_SESSION_TYPE=x11, and non-empty DISPLAY; Wayland and XWayland "
+                "are refused\n"
+            );
         } else {
             (void)fprintf(stderr, "pvault: %s\n", pv_status_string(status));
         }
