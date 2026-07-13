@@ -38,7 +38,9 @@ The complete architecture and four-phase roadmap are available in Portuguese:
 [`docs/ARCHITECTURE.pt-BR.md`](docs/ARCHITECTURE.pt-BR.md) and
 [`docs/ROADMAP.pt-BR.md`](docs/ROADMAP.pt-BR.md).
 Release and reproducibility procedures are in
-[`docs/RELEASES.md`](docs/RELEASES.md).
+[`docs/RELEASES.md`](docs/RELEASES.md). The signed A/B/A restore drill is
+documented separately in
+[`docs/EXTERNAL_RESTORE.md`](docs/EXTERNAL_RESTORE.md).
 
 ## Dependencies
 
@@ -59,12 +61,13 @@ Build:
 - GCC or Clang
 - Python 3.10 or newer for compatibility-vector and PTY/clipboard tests
 - Git for reproducibility checks and source archives
+- OpenSSH for the manual external-restore signatures
 - GnuPG for release signing (release maintainers only)
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed base-devel cmake ninja pkgconf libsodium libcbor ncurses xclip python git gnupg
+sudo pacman -S --needed base-devel cmake ninja pkgconf libsodium libcbor ncurses xclip python git openssh gnupg
 ```
 
 For the optional picker:
@@ -159,8 +162,8 @@ native-X11 i3 session. It is never run by CI and requires explicit human
 consent because it overwrites the current clipboard. It uses only synthetic
 data, does not read, save, or restore the previous clipboard value, and aborts
 when it detects a clipboard manager. Its TTL ends PVault's ownership; it cannot
-prove revocation or erasure. The live-session gate remains open until a person
-has deliberately run and reviewed this canary.
+prove revocation or erasure. A first operator-run canary was reported `PASS` at
+commit `ca34379`; every release candidate must repeat and review it manually.
 
 ```sh
 ./scripts/test-live-x11-i3.sh --acknowledge-live-clipboard-overwrite
@@ -175,6 +178,10 @@ reproducibility boundary.
 directory. It exercises authenticated backup, post-backup mutation, read-only
 rescue copy, password/recovery verification, and restore into a separate path;
 it fails unless the active vault remains byte-exact throughout rescue.
+The separate-machine extension in
+[`docs/EXTERNAL_RESTORE.md`](docs/EXTERNAL_RESTORE.md) is implemented but has
+not yet produced an accepted receipt from another computer. Its CI parser test
+does not close that manual gate.
 
 CTest also runs Linux integration coverage with a real controlling PTY and
 deterministic fake X11/Wayland clipboard owners; it does not require an active

@@ -468,6 +468,21 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "unit;compatibility;format" TIMEOUT 120
     )
 
+    add_test(
+        NAME pvault_external_restore_protocol_unit
+        COMMAND
+            ${CMAKE_COMMAND} -E env
+            "PYTHONDONTWRITEBYTECODE=1"
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/manual/test_external_restore_protocol.py
+    )
+    set_tests_properties(
+        pvault_external_restore_protocol_unit
+        PROPERTIES
+            LABELS "unit;security;external-restore-parser"
+            TIMEOUT 30
+    )
+
     if(PVAULT_BUILD_INTEGRATION_TESTS)
         if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
             message(FATAL_ERROR "PVAULT_BUILD_INTEGRATION_TESTS currently requires Linux")
@@ -765,11 +780,15 @@ else()
         SECURITY.md
         THREAT_MODEL.md
         CONTRIBUTING.md
+        DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    )
+    install(FILES
         docs/FORMAT.md
         docs/COMPATIBILITY.md
         docs/ARCHITECTURE.pt-BR.md
         docs/ROADMAP.pt-BR.md
         docs/RELEASES.md
-        DESTINATION ${CMAKE_INSTALL_DOCDIR}
+        docs/EXTERNAL_RESTORE.md
+        DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs
     )
 endif()

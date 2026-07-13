@@ -35,6 +35,10 @@ truth and can run on a self-hosted runner or another forge:
 ./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh
 ./scripts/test-real-wayland.sh  # experimental characterization only
+# Manual A/B/A gate; see docs/EXTERNAL_RESTORE.md:
+./scripts/external-restore-prepare.sh ...
+./scripts/external-restore-run.sh ...
+./scripts/external-restore-check-result.sh ...
 ```
 
 `ci-build.sh all` runs the four ordinary build profiles sequentially. The
@@ -83,9 +87,10 @@ session and explicitly consent to replacing the current clipboard. It uses
 only a synthetic canary, never reads, saves, or restores the prior clipboard,
 and aborts if it detects a clipboard manager. Expiration of its TTL demonstrates
 the bounded ownership path only; it is not proof of revocation or erasure. The
-corresponding release gate remains open until this human-run check is completed
-and reviewed; the existence or automated testing of the script does not close
-it.
+first live run was reported `PASS` on 2026-07-13 at commit `ca34379`. This is a
+limited operator observation for that revision, not a cryptographic
+attestation. A release candidate must repeat and review the manual check; the
+existence or automated testing of the script never closes this gate.
 
 It requires X-Resource 1.2 development metadata (`libxres` on Arch) to bind
 the current selection Window to the captured local `xclip` PID. Missing or
@@ -107,6 +112,21 @@ include `detect_leaks=0` to retain that default. Before a release, run
 `ci-build.sh lsan` in the isolated environment described above and use
 synthetic fixtures only. The LSan profile preserves process hardening; the
 capability belongs to the test container rather than to the PVault executable.
+
+## External-machine restore attestation
+
+The manual A/B/A protocol is documented in
+[`EXTERNAL_RESTORE.md`](EXTERNAL_RESTORE.md). It binds synthetic bytes produced
+on machine A to a signed request, checks the source archive against an
+independent clean checkout on machine B, exercises those exact payload bytes,
+and returns a separately signed result for acceptance and countersignature on
+A. Its parser unit tests may run in CI, but no CI job, parser PASS, self-test,
+VM, or container on A can satisfy the external-machine gate.
+
+As of 2026-07-13 this protocol is implemented but has **not yet been executed
+on a separate machine**. Therefore no external restore receipt exists and that
+release gate remains open. The signed classification is deliberately an
+operator declaration, not cryptographic proof of physical separation.
 
 ## Fuzz state
 
@@ -186,9 +206,12 @@ rescue artifacts must never contain real credentials.
 5. Manually run `scripts/test-live-x11-i3.sh` in the intended native-X11 i3
    session with synthetic data and explicit consent. Record and review the
    result; do not delegate this gate to CI.
-6. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
-   password/recovery rotation, rescue/rollback copy, and restore with synthetic
-   data on a separate machine.
+6. Run `scripts/restore-drill.sh`, then complete the three-stage protocol in
+   [`EXTERNAL_RESTORE.md`](EXTERNAL_RESTORE.md) with synthetic data on a
+   separate physical machine and storage: `external-restore-prepare.sh` on A,
+   `external-restore-run.sh` from an independent clone on B, and
+   `external-restore-check-result.sh` on A. Review and retain the signed receipt;
+   automated parser tests never satisfy this gate.
 7. Review `THREAT_MODEL.md`, `SECURITY.md`, `FORMAT.md`, `COMPATIBILITY.md`,
    dependencies, and format vectors. If the release freezes or changes a format,
    satisfy the format compatibility gate above.
