@@ -95,6 +95,42 @@ static size_t decode_codepoint(const uint8_t *const data, const size_t len, uint
     return width;
 }
 
+bool pv_text_sanitize(
+    const pv_slice *const slice,
+    uint8_t *const output,
+    const size_t capacity,
+    size_t *const output_len
+)
+{
+    size_t input_position = 0U;
+    size_t output_position = 0U;
+
+    if (slice == NULL || output_len == NULL ||
+        (slice->data == NULL && slice->len != 0U) ||
+        (output == NULL && slice->len != 0U) || capacity < slice->len) {
+        return false;
+    }
+    while (input_position < slice->len) {
+        uint32_t codepoint = 0U;
+        size_t width = decode_codepoint(
+            slice->data + input_position,
+            slice->len - input_position,
+            &codepoint
+        );
+
+        if (width == 0U || display_codepoint_unsafe(codepoint)) {
+            output[output_position++] = (uint8_t)'?';
+            input_position += width == 0U ? 1U : width;
+        } else {
+            (void)memcpy(output + output_position, slice->data + input_position, width);
+            output_position += width;
+            input_position += width;
+        }
+    }
+    *output_len = output_position;
+    return true;
+}
+
 void pv_text_fprint(FILE *const stream, const pv_slice *const slice)
 {
     size_t position = 0U;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import stat
@@ -12,11 +13,15 @@ from typing import Sequence
 
 from pty_harness import (
     PtyProcess,
+    SplitPtyProcess,
     add_record,
     initialize_vault,
     invocation_contains_secret,
     isolated_environment,
+    pid_exists,
+    process_signal_ignored,
     process_state,
+    wait_until,
 )
 
 
@@ -25,6 +30,8 @@ BUILD_DIRECTORY = Path(
     os.environ.get("PVAULT_BUILD_DIR", str(REPOSITORY / "build" / "debug"))
 ).resolve()
 PVAULT = BUILD_DIRECTORY / "pvault"
+ROFI_TEST_PVAULT = Path(os.environ.get("PVAULT_TEST_ROFI_PVAULT", ""))
+SIGNAL_LAUNCHER = Path(os.environ.get("PVAULT_TEST_SIGNAL_LAUNCHER", ""))
 
 
 class CliPtyIntegrationTests(unittest.TestCase):
@@ -81,6 +88,7 @@ class CliPtyIntegrationTests(unittest.TestCase):
         secrets: Sequence[bytes],
         *,
         environment: dict[str, str],
+        selector: bytes | None = None,
         expected_returncode: int = 0,
     ) -> bytes:
         with PtyProcess(
@@ -93,6 +101,9 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assertFalse(process.echo_enabled())
             self.assert_invocation_clean(process, secrets)
             process.send_line(master_password)
+            if selector is not None:
+                process.expect(b"PVault search:")
+                process.send_line(selector)
             return self.finish_secret_process(
                 process,
                 secrets,
@@ -306,33 +317,444 @@ class CliPtyIntegrationTests(unittest.TestCase):
                 cwd=REPOSITORY,
                 env=environment,
             )
-            self.assertIn(b"Added ", add_output)
+            self.assertIn(b"Record added", add_output)
 
-            with PtyProcess(
-                [PVAULT, "--vault", vault, "show", "PTY"],
-                cwd=REPOSITORY,
-                env=environment,
-            ) as process:
-                process.register_secret(master)
-                process.register_secret(record_secret)
-                process.expect(b"Master password: ")
-                self.assertFalse(process.echo_enabled())
-                self.assertEqual([], invocation_contains_secret(process, master))
-                process.send_line(master)
-                self.assertEqual(0, process.wait(15.0), process.safe_output())
-                output = bytes(process.output)
-                self.assertIn(b"Title: PTY Account", output)
-                self.assertIn(b"Username: pty-user", output)
-                self.assertIn(b"Password: <secret>", output)
-                self.assert_secret_absent(master, output, "show output")
-                self.assert_secret_absent(record_secret, output, "show output")
-                self.assertTrue(process.echo_enabled())
+            output = self.run_master_authenticated(
+                vault,
+                ("show",),
+                master,
+                (master, record_secret),
+                environment=environment,
+                selector=b"PTY",
+            )
+            self.assertIn(b"Title: PTY Account", output)
+            self.assertIn(b"Username: pty-user", output)
+            self.assertIn(b"Password: <secret>", output)
 
             vault_bytes = vault.read_bytes()
             self.assert_secret_absent(master, vault_bytes, "encrypted vault bytes")
             self.assert_secret_absent(record_secret, vault_bytes, "encrypted vault bytes")
             self.assertEqual(0o600, stat.S_IMODE(vault.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(recovery.stat().st_mode))
+
+    def test_legacy_record_selectors_fail_before_unlock_without_echoing(self) -> None:
+        selector = b"LEGACY-SELECTOR-ARGV-CANARY"
+        with tempfile.TemporaryDirectory(prefix="pvault-legacy-selector-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            vault = root / "unused-vault.pvlt"
+
+            for command in ("edit", "remove", "list", "show", "copy"):
+                with self.subTest(command=command):
+                    with PtyProcess(
+                        [PVAULT, "--vault", vault, command, selector.decode("ascii")],
+                        cwd=REPOSITORY,
+                        env=environment,
+                    ) as process:
+                        process.register_secret(selector)
+                        returncode = process.wait(5.0)
+                        output = bytes(process.output)
+
+                        self.assertEqual(2, returncode, process.safe_output())
+                        self.assertNotIn(b"Master password: ", output)
+                        self.assertNotIn(selector, output)
+                        self.assertIn(b"positional record selectors are disabled", output)
+                        self.assertTrue(process.echo_enabled())
+
+    def test_private_metadata_output_is_gated_before_unlock(self) -> None:
+        master = b"Redirect-Gate-Master-Secret-123!"
+        record_secret = b"Redirect-Gate-Record-Secret-456!"
+        title = b"PRIVATE-OUTPUT-TITLE-CANARY"
+        username = b"PRIVATE-OUTPUT-USERNAME-CANARY"
+        secrets = (master, record_secret, title, username)
+
+        with tempfile.TemporaryDirectory(prefix="pvault-output-gate-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            add_record(
+                PVAULT,
+                vault,
+                master,
+                record_secret,
+                title=title,
+                username=username,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+
+            for arguments in (("list",), ("show",), ("pick",), ("shell",)):
+                with self.subTest(command=arguments[0]):
+                    with SplitPtyProcess(
+                        [PVAULT, "--vault", vault, *arguments],
+                        cwd=REPOSITORY,
+                        env=environment,
+                    ) as process:
+                        self.register_secrets(process, secrets)
+                        self.assert_invocation_clean(process, secrets)
+                        returncode = process.wait(5.0)
+                        terminal_output = bytes(process.output)
+                        redirected_stdout = bytes(process.stdout)
+
+                        self.assertEqual(2, returncode, process.safe_output())
+                        self.assertEqual(b"", redirected_stdout)
+                        self.assertNotIn(b"Master password: ", terminal_output)
+                        self.assertIn(b"redirect", terminal_output)
+                        for secret in secrets:
+                            self.assert_secret_absent(
+                                secret,
+                                terminal_output,
+                                "redirect refusal terminal output",
+                            )
+                            self.assert_secret_absent(
+                                secret,
+                                redirected_stdout,
+                                "refused redirected stdout",
+                            )
+                        self.assertTrue(process.echo_enabled())
+
+            with SplitPtyProcess(
+                [PVAULT, "--vault", vault, "list", "--allow-redirect"],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, secrets)
+                process.expect(b"Master password: ")
+                self.assertEqual(b"", bytes(process.stdout))
+                self.assertFalse(process.echo_enabled())
+                self.assert_invocation_clean(process, secrets)
+                process.send_line(master)
+                returncode = process.wait(15.0)
+                terminal_output = bytes(process.output)
+                redirected_stdout = bytes(process.stdout)
+
+                self.assertEqual(0, returncode, process.safe_output())
+                self.assertIn(title, redirected_stdout)
+                self.assertIn(username, redirected_stdout)
+                self.assertIn(b"1 record", redirected_stdout)
+                self.assert_secret_absent(master, terminal_output, "terminal output")
+                self.assert_secret_absent(master, redirected_stdout, "redirected stdout")
+                self.assert_secret_absent(
+                    record_secret,
+                    terminal_output,
+                    "terminal output",
+                )
+                self.assert_secret_absent(
+                    record_secret,
+                    redirected_stdout,
+                    "redirected stdout",
+                )
+                self.assertTrue(process.echo_enabled())
+
+    def test_rofi_boundary_resets_process_state_and_uses_ephemeral_token(self) -> None:
+        if not ROFI_TEST_PVAULT.is_file() or not SIGNAL_LAUNCHER.is_file():
+            self.skipTest("test-only rofi CLI and signal launcher are unavailable")
+
+        master = b"Rofi-Boundary-Master-Secret-123!"
+        record_secret = b"Rofi-Boundary-Record-Secret-456!"
+        title = b"ROFI-TITLE-\x1b[31m-CANARY"
+        sanitized_title = b"ROFI-TITLE-?[31m-CANARY"
+        username = b"ROFI-USERNAME-CANARY"
+        secrets = (master, record_secret, title, username)
+
+        with tempfile.TemporaryDirectory(prefix="pvault-rofi-boundary-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            environment["DISPLAY"] = ":99"
+            environment["PATH"] = "/definitely/not-the-rofi-path"
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+            (Path(environment["HOME"]) / "fake-rofi.expected-title").write_bytes(
+                sanitized_title + b"\n"
+            )
+
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            add_record(
+                PVAULT,
+                vault,
+                master,
+                record_secret,
+                title=title,
+                username=username,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+
+            def run_rofi(expected_returncode: int) -> bytes:
+                with PtyProcess(
+                    [
+                        SIGNAL_LAUNCHER,
+                        ROFI_TEST_PVAULT,
+                        "--vault",
+                        vault,
+                        "pick",
+                        "--rofi",
+                    ],
+                    cwd=REPOSITORY,
+                    env=environment,
+                ) as process:
+                    self.register_secrets(process, (master, record_secret))
+                    process.expect(b"Master password: ")
+                    self.assertFalse(process.echo_enabled())
+                    self.assert_invocation_clean(process, secrets)
+                    process.send_line(master)
+                    return self.finish_secret_process(
+                        process,
+                        (master, record_secret),
+                        expected_returncode=expected_returncode,
+                        timeout=20.0,
+                    )
+
+            for _ in range(2):
+                output = run_rofi(0)
+                self.assertIn(b"Title: " + sanitized_title, output)
+                self.assertIn(b"Username: " + username, output)
+                self.assertIn(b"Password: <secret>", output)
+                self.assertNotIn(title, output)
+            tokens = (Path(environment["HOME"]) / "fake-rofi.tokens").read_text(
+                encoding="ascii"
+            ).splitlines()
+            self.assertEqual(2, len(tokens))
+            self.assertNotEqual(tokens[0], tokens[1])
+            self.assertTrue(all(len(token) == 16 for token in tokens))
+
+            mode_path = Path(environment["HOME"]) / "fake-rofi.mode"
+            for mode in ("unknown", "extra-tab", "truncated"):
+                with self.subTest(rofi_response=mode):
+                    mode_path.write_text(mode + "\n", encoding="ascii")
+                    rejected = run_rofi(1)
+                    self.assertIn(b"record not found", rejected)
+
+            mode_path.write_text("ignore-term\n", encoding="ascii")
+            failed = run_rofi(7)
+            self.assertIn(b"external integration failed", failed)
+            fake_pid = int(
+                (Path(environment["HOME"]) / "fake-rofi.pid").read_text(
+                    encoding="ascii"
+                )
+            )
+            wait_until(lambda: not pid_exists(fake_pid), 5.0, "fake rofi KILL cleanup")
+
+    def test_copy_selects_duplicate_custom_field_by_private_ordinal(self) -> None:
+        if not ROFI_TEST_PVAULT.is_file():
+            self.skipTest("test-only private CLI is unavailable")
+
+        master = b"Custom-Ordinal-Master-Secret-123!"
+        record_password = b"Custom-Ordinal-Record-Secret-456!"
+        first_value = b"Custom-Ordinal-First-Secret-789!"
+        second_value = b"Custom-Ordinal-Second-Secret-012!"
+        title = b"Duplicate Custom Fixture"
+        field_name = b"Duplicate Field"
+        protected = (master, record_password, first_value, second_value)
+
+        with tempfile.TemporaryDirectory(prefix="pvault-custom-ordinal-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            environment["DISPLAY"] = ":99"
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+            home = Path(environment["HOME"])
+
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            with PtyProcess(
+                [PVAULT, "--vault", vault, "add"],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, protected)
+                process.expect(b"Master password: ")
+                process.send_line(master)
+                process.expect(b"Title: ")
+                process.send_line(title)
+                process.expect(b"Username: ")
+                process.send_line(b"duplicate-user")
+                process.expect(b"Password [g=generate/e=enter] (g): ")
+                process.send_line(b"e")
+                process.expect(b"Password: ")
+                process.send_line(record_password)
+                process.expect(b"URLs (comma-separated): ")
+                process.send_line(b"")
+                process.expect(b"Notes (single line): ")
+                process.send_line(b"")
+                process.expect(b"Tags (comma-separated): ")
+                process.send_line(b"")
+                process.expect(b"Custom fields count [0]: ")
+                process.send_line(b"2")
+                for index, value in enumerate((first_value, second_value), start=1):
+                    process.expect(f"Custom field {index} name: ".encode("ascii"))
+                    process.send_line(field_name)
+                    process.expect(b"Secret value? [y/N]: ")
+                    process.send_line(b"y")
+                    process.expect(f"Custom field {index} value: ".encode("ascii"))
+                    process.send_line(value)
+                add_output = self.finish_secret_process(process, protected)
+            self.assertIn(b"Record added", add_output)
+
+            with SplitPtyProcess(
+                [
+                    ROFI_TEST_PVAULT,
+                    "--vault",
+                    vault,
+                    "copy",
+                    "--field",
+                    "custom",
+                    "--ttl",
+                    "1",
+                ],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, protected)
+                process.expect(b"Master password: ")
+                self.assert_invocation_clean(process, (*protected, title, field_name))
+                process.send_line(master)
+                process.expect(b"PVault search:")
+                process.send_line(b"Duplicate Custom")
+                process.expect(b"Custom fields:")
+                process.expect(b"1. Duplicate Field")
+                process.expect(b"2. Duplicate Field")
+                process.expect(b"Custom field number: ")
+                process.send_line(b"2")
+                returncode = process.wait(20.0)
+                terminal_output = bytes(process.output)
+                redirected_stdout = bytes(process.stdout)
+                self.assertEqual(0, returncode, process.safe_output())
+                self.assertTrue(process.echo_enabled())
+
+            self.assertIn(b"1. Duplicate Field", terminal_output)
+            self.assertIn(b"2. Duplicate Field", terminal_output)
+            self.assertNotIn(field_name, redirected_stdout)
+            self.assertIn(b"Requested field queued", redirected_stdout)
+            for value in protected:
+                self.assertNotIn(value, terminal_output)
+                self.assertNotIn(value, redirected_stdout)
+            result_path = home / "result.json"
+            wait_until(result_path.is_file, 5.0, "fake clipboard result")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(second_value), result["length"])
+            self.assertEqual(sha256(second_value).hexdigest(), result["sha256"])
+            self.assertFalse(result["secret_in_argv"])
+            self.assertFalse(result["secret_in_cmdline"])
+            self.assertFalse(result["secret_in_environment"])
+            self.assertTrue(result["sigchld_default"])
+            self.assertFalse(result["sigterm_blocked"])
+            owner_pid = int((home / "owner.pid").read_text(encoding="ascii"))
+            wait_until(lambda: not pid_exists(owner_pid), 5.0, "fake clipboard owner cleanup")
+
+    def test_remove_cancel_keeps_identity_on_tty_and_stdout_generic(self) -> None:
+        master = b"Remove-Cancel-Master-Secret-123!"
+        record_secret = b"Remove-Cancel-Record-Secret-456!"
+        title = b"REMOVE-TITLE-\x1b[31m-CANARY"
+        sanitized_title = b"REMOVE-TITLE-?[31m-CANARY"
+        username = b"REMOVE-USERNAME-CANARY"
+        secrets = (master, record_secret, title, username)
+
+        with tempfile.TemporaryDirectory(prefix="pvault-remove-cancel-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            add_record(
+                PVAULT,
+                vault,
+                master,
+                record_secret,
+                title=title,
+                username=username,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            vault_before = vault.read_bytes()
+
+            with SplitPtyProcess(
+                [PVAULT, "--vault", vault, "remove"],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, secrets)
+                process.expect(b"Master password: ")
+                self.assertFalse(process.echo_enabled())
+                self.assert_invocation_clean(process, secrets)
+                process.send_line(master)
+                process.expect(b"PVault search:")
+                process.send_line(b"REMOVE-TITLE")
+                process.expect(b"Selected for deletion: " + sanitized_title)
+                process.expect(b"Delete the selected record [y/N]: ")
+                self.assertTrue(process.echo_enabled())
+                process.send_line(b"N")
+                returncode = process.wait(15.0)
+                terminal_output = bytes(process.output)
+                redirected_stdout = bytes(process.stdout)
+
+                self.assertEqual(0, returncode, process.safe_output())
+                self.assertEqual(b"Deletion cancelled\n", redirected_stdout)
+                self.assertIn(b"Selected for deletion: " + sanitized_title, terminal_output)
+                self.assertNotIn(title, terminal_output)
+                self.assertNotIn(title, redirected_stdout)
+                self.assertNotIn(sanitized_title, redirected_stdout)
+                self.assertNotIn(username, redirected_stdout)
+                self.assert_secret_absent(master, terminal_output, "remove terminal output")
+                self.assert_secret_absent(master, redirected_stdout, "remove stdout")
+                self.assert_secret_absent(
+                    record_secret,
+                    terminal_output,
+                    "remove terminal output",
+                )
+                self.assert_secret_absent(
+                    record_secret,
+                    redirected_stdout,
+                    "remove stdout",
+                )
+                self.assertTrue(process.echo_enabled())
+
+            self.assertEqual(vault_before, vault.read_bytes())
+            list_output = self.run_master_authenticated(
+                vault,
+                ("list",),
+                master,
+                (master, record_secret),
+                environment=environment,
+            )
+            self.assertIn(b"1 record", list_output)
+            self.assertIn(sanitized_title, list_output)
+            self.assertIn(username, list_output)
 
     def test_master_password_policy_is_shared_by_init_and_passwd(self) -> None:
         policy_message = (
@@ -464,10 +886,11 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assertIn(b"authentication or integrity check failed", rejected_output)
             show_output = self.run_master_authenticated(
                 vault,
-                ("show", "Rotation Fixture"),
+                ("show",),
                 rotated_master,
                 all_secrets,
                 environment=environment,
+                selector=b"Rotation Fixture",
             )
             self.assertIn(b"Title: Rotation Fixture", show_output)
             self.assertIn(b"Password: <secret>", show_output)
@@ -519,10 +942,11 @@ class CliPtyIntegrationTests(unittest.TestCase):
             )
             final_output = self.run_master_authenticated(
                 vault,
-                ("show", "Rotation Fixture"),
+                ("show",),
                 recovered_master,
                 all_secrets,
                 environment=environment,
+                selector=b"Rotation Fixture",
             )
             self.assertIn(b"Title: Rotation Fixture", final_output)
             self.assertIn(b"Username: fixture-user", final_output)
@@ -626,10 +1050,11 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assertIn(b"1 record", restored_output)
             retained_output = self.run_master_authenticated(
                 vault,
-                ("show", "Retained Fixture"),
+                ("show",),
                 master,
                 all_secrets,
                 environment=environment,
+                selector=b"Retained Fixture",
             )
             self.assertIn(b"Username: retained-user", retained_output)
             self.assertIn(b"Password: <secret>", retained_output)
@@ -735,6 +1160,69 @@ class CliPtyIntegrationTests(unittest.TestCase):
             self.assertIn(b"Ciphertext bytes (UNAUTHENTICATED):", inspect_output)
             self.assertNotIn(b"Master password", inspect_output)
             self.assertNotIn(b"hash", inspect_output.lower())
+            self.assert_snapshot_state(source, source_state)
+            self.assert_snapshot_state(vault, active_state)
+
+            with SplitPtyProcess(
+                [PVAULT, "rescue", "verify", source],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, all_secrets)
+                self.assert_invocation_clean(process, all_secrets)
+                returncode = process.wait(5.0)
+                terminal_output = bytes(process.output)
+                redirected_stdout = bytes(process.stdout)
+
+                self.assertEqual(2, returncode, process.safe_output())
+                self.assertEqual(b"", redirected_stdout)
+                self.assertNotIn(b"Master password for snapshot: ", terminal_output)
+                self.assertIn(b"refusing to emit decrypted record metadata", terminal_output)
+                for secret in all_secrets:
+                    self.assert_secret_absent(
+                        secret,
+                        terminal_output,
+                        "rescue verify redirect refusal",
+                    )
+                    self.assert_secret_absent(
+                        secret,
+                        redirected_stdout,
+                        "refused rescue verify stdout",
+                    )
+                self.assertTrue(process.echo_enabled())
+
+            with SplitPtyProcess(
+                [PVAULT, "rescue", "verify", source, "--allow-redirect"],
+                cwd=REPOSITORY,
+                env=environment,
+            ) as process:
+                self.register_secrets(process, all_secrets)
+                process.expect(b"Master password for snapshot: ")
+                self.assertEqual(b"", bytes(process.stdout))
+                self.assertFalse(process.echo_enabled())
+                self.assert_invocation_clean(process, all_secrets)
+                process.send_line(master)
+                returncode = process.wait(15.0)
+                terminal_output = bytes(process.output)
+                redirected_stdout = bytes(process.stdout)
+
+                self.assertEqual(0, returncode, process.safe_output())
+                self.assert_snapshot_identity_only(redirected_stdout, 1)
+                self.assertNotIn(b"Rescue Retained Fixture", redirected_stdout)
+                self.assertNotIn(b"rescue-retained-user", redirected_stdout)
+                for secret in all_secrets:
+                    self.assert_secret_absent(
+                        secret,
+                        terminal_output,
+                        "rescue verify terminal output",
+                    )
+                    self.assert_secret_absent(
+                        secret,
+                        redirected_stdout,
+                        "authenticated snapshot identity",
+                    )
+                self.assertTrue(process.echo_enabled())
+
             self.assert_snapshot_state(source, source_state)
             self.assert_snapshot_state(vault, active_state)
 
@@ -846,10 +1334,22 @@ class CliPtyIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(0, help_result.returncode, help_result.stderr)
             self.assertIn(b"Usage: pvault rescue inspect", help_result.stdout)
+            self.assertIn(
+                b"pvault rescue verify SNAPSHOT [--recovery FILE] [--allow-redirect]",
+                help_result.stdout,
+            )
             for arguments, expected_usage in (
-                (("list", "--help"), b"Usage: pvault [--vault PATH] list [QUERY]"),
+                (
+                    ("list", "--help"),
+                    b"Usage: pvault [--vault PATH] list [--allow-redirect]",
+                ),
                 (("config", "--help"), b"Usage: pvault config check"),
                 (("rescue", "inspect", "--help"), b"Usage: pvault rescue inspect SNAPSHOT"),
+                (
+                    ("rescue", "verify", "--help"),
+                    b"Usage: pvault rescue verify SNAPSHOT "
+                    b"[--recovery FILE] [--allow-redirect]",
+                ),
                 (
                     ("recovery", "rotate", "--help"),
                     b"Usage: pvault [--vault PATH] recovery rotate --out PATH",
@@ -1074,6 +1574,112 @@ class CliPtyIntegrationTests(unittest.TestCase):
                         self.assertTrue(process.echo_enabled())
                     self.assertFalse(vault.exists())
                     self.assertFalse(recovery.exists())
+
+    def test_internal_picker_signals_restore_echo_after_unlock(self) -> None:
+        master = b"Picker-Signal-Master-Secret-123!"
+        record_secret = b"Picker-Signal-Record-Secret-456!"
+        secrets = (master, record_secret)
+
+        with tempfile.TemporaryDirectory(prefix="pvault-picker-signals-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            environment = isolated_environment(root)
+            vault = root / "vault.pvlt"
+            recovery = root / "recovery.txt"
+
+            initialize_vault(
+                PVAULT,
+                vault,
+                recovery,
+                master,
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            add_record(
+                PVAULT,
+                vault,
+                master,
+                record_secret,
+                title=b"Picker Signal Fixture",
+                username=b"picker-signal-user",
+                cwd=REPOSITORY,
+                env=environment,
+            )
+            vault_before = vault.read_bytes()
+
+            for signal_number in (
+                signal.SIGINT,
+                signal.SIGTERM,
+                signal.SIGHUP,
+                signal.SIGQUIT,
+                signal.SIGTSTP,
+            ):
+                with self.subTest(signal=signal.Signals(signal_number).name):
+                    with PtyProcess(
+                        [PVAULT, "--vault", vault, "show"],
+                        cwd=REPOSITORY,
+                        env=environment,
+                    ) as process:
+                        self.register_secrets(process, secrets)
+                        process.expect(b"Master password: ")
+                        self.assertFalse(process.echo_enabled())
+                        self.assert_invocation_clean(process, secrets)
+                        process.send_line(master)
+                        process.expect(b"PVault search:")
+                        self.assertFalse(process.echo_enabled())
+                        ignored = process_signal_ignored(process.pid, signal_number)
+                        process.send_signal(signal_number)
+
+                        if signal_number == signal.SIGTSTP:
+                            if ignored:
+                                process.read_for(0.2)
+                                self.assertIsNone(process.returncode)
+                                self.assertFalse(process.echo_enabled())
+                                process.send_signal(signal.SIGTERM)
+                            else:
+                                wait_until(
+                                    lambda: (
+                                        (state := process_state(process.pid)) is None
+                                        or state in {"T", "t", "Z"}
+                                    ),
+                                    5.0,
+                                    "internal picker to stop or exit after SIGTSTP",
+                                )
+                                self.assertTrue(
+                                    process.echo_enabled(),
+                                    "picker left echo disabled after SIGTSTP cleanup",
+                                )
+                                if process_state(process.pid) in {"T", "t"}:
+                                    process.send_signal(signal.SIGCONT)
+                                    process.read_for(0.2)
+                                    if process.returncode is None:
+                                        process.send_signal(signal.SIGTERM)
+                            returncode = process.wait(5.0)
+                            self.assertNotEqual(0, returncode, process.safe_output())
+                        else:
+                            returncode = process.wait(5.0)
+                            self.assertNotEqual(
+                                0,
+                                returncode,
+                                process.safe_output(),
+                            )
+
+                        self.assert_secret_absent(
+                            master,
+                            process.output,
+                            "picker signal terminal output",
+                        )
+                        self.assert_secret_absent(
+                            record_secret,
+                            process.output,
+                            "picker signal terminal output",
+                        )
+                        self.assertTrue(
+                            process.echo_enabled(),
+                            "picker did not restore echo after signal",
+                        )
+
+            self.assertEqual(vault_before, vault.read_bytes())
 
     def test_stop_signal_restores_echo_before_stop_or_exit(self) -> None:
         partial_secret = b"STOP-SIGNAL-SECRET-MUST-NOT-ECHO"

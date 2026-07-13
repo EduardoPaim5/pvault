@@ -60,7 +60,11 @@ pv_status pv_shell_run(pv_cli_context *const context)
     char line[512];
     pv_status status;
 
-    if (context == NULL || !isatty(STDIN_FILENO)) {
+    if (context == NULL || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        (void)fprintf(
+            stderr,
+            "pvault: shell requires terminal input and output; redirected metadata is refused\n"
+        );
         return PV_ERR_USAGE;
     }
     status = pv_clipboard_prepare(&clipboard, context->config.clipboard_ttl);
@@ -104,6 +108,16 @@ pv_status pv_shell_run(pv_cli_context *const context)
         if (ready < 0 || fgets(line, sizeof(line), stdin) == NULL) {
             status = ready < 0 ? PV_ERR_IO : PV_OK;
             break;
+        }
+        if (strchr(line, '\n') == NULL && !feof(stdin)) {
+            int byte;
+
+            do {
+                byte = fgetc(stdin);
+            } while (byte != '\n' && byte != EOF);
+            sodium_memzero(line, sizeof(line));
+            (void)printf("Input line is too long; command discarded.\n");
+            continue;
         }
         line[strcspn(line, "\r\n")] = '\0';
         command = line;

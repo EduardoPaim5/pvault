@@ -354,6 +354,12 @@ bool pv_hex_decode(const char *input, uint8_t *output, size_t output_len);
 bool pv_slice_equal_cstr(const pv_slice *slice, const char *text, bool ascii_casefold);
 bool pv_slice_contains_cstr(const pv_slice *slice, const char *text, bool ascii_casefold);
 bool pv_utf8_valid(const uint8_t *data, size_t len);
+bool pv_text_sanitize(
+    const pv_slice *slice,
+    uint8_t *output,
+    size_t capacity,
+    size_t *output_len
+);
 void pv_text_fprint(FILE *stream, const pv_slice *slice);
 
 #endif
