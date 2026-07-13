@@ -77,6 +77,24 @@ Destroying Weston removes the isolated test state as harness cleanup, not as a
 PVault guarantee. Neither test connects to the user's display session, and all
 payloads are synthetic.
 
+The live-i3 canary, `scripts/test-live-x11-i3.sh`, is intentionally excluded
+from CI and automation. A human must run it in the intended native-X11 i3
+session and explicitly consent to replacing the current clipboard. It uses
+only a synthetic canary, never reads, saves, or restores the prior clipboard,
+and aborts if it detects a clipboard manager. Expiration of its TTL demonstrates
+the bounded ownership path only; it is not proof of revocation or erasure. The
+corresponding release gate remains open until this human-run check is completed
+and reviewed; the existence or automated testing of the script does not close
+it.
+
+It requires X-Resource 1.2 development metadata (`libxres` on Arch) to bind
+the current selection Window to the captured local `xclip` PID. Missing or
+remote PID identity fails closed before the content read.
+
+```sh
+./scripts/test-live-x11-i3.sh --acknowledge-live-clipboard-overwrite
+```
+
 The checked-in hosted workflow currently covers x86-64 Arch Linux with glibc.
 It does not claim ARM64, musl, another distribution, or another kernel. Those
 cross-platform jobs remain a roadmap gate; the local scripts are intentionally
@@ -165,18 +183,21 @@ rescue artifacts must never contain real credentials.
    reproducibility check from a clean clone. Treat a green Weston result as
    reproduction of the known retention boundary, never as release support.
 4. Run the extended fuzz campaign and privately resolve every crash.
-5. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
+5. Manually run `scripts/test-live-x11-i3.sh` in the intended native-X11 i3
+   session with synthetic data and explicit consent. Record and review the
+   result; do not delegate this gate to CI.
+6. Run `scripts/restore-drill.sh`, then exercise init, mutation, backup,
    password/recovery rotation, rescue/rollback copy, and restore with synthetic
    data on a separate machine.
-6. Review `THREAT_MODEL.md`, `SECURITY.md`, `FORMAT.md`, `COMPATIBILITY.md`,
+7. Review `THREAT_MODEL.md`, `SECURITY.md`, `FORMAT.md`, `COMPATIBILITY.md`,
    dependencies, and format vectors. If the release freezes or changes a format,
    satisfy the format compatibility gate above.
-7. Create a signed annotated tag such as `v0.1.0`.
-8. Generate the source archive from that tag, compute SHA-256, and sign the
+8. Create a signed annotated tag such as `v0.1.0`.
+9. Generate the source archive from that tag, compute SHA-256, and sign the
    checksum file with the project's published release key.
-9. Replace the development PKGBUILD's local archive, absent upstream URL, and
+10. Replace the development PKGBUILD's local archive, absent upstream URL, and
    `SKIP` checksum with the immutable release URL and real SHA-256 digest.
-10. Have an independent maintainer rebuild and compare before publication.
+11. Have an independent maintainer rebuild and compare before publication.
 
 Example archive commands after the signed tag exists:
 
