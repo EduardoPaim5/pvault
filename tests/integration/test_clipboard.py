@@ -24,6 +24,9 @@ from pty_harness import (
 REPOSITORY = Path(__file__).resolve().parents[2]
 DRIVER_SOURCE = REPOSITORY / "tests" / "integration" / "clipboard_driver.c"
 FAKE_OWNER_SOURCE = REPOSITORY / "tests" / "integration" / "fake_clipboard_owner.c"
+PREBUILT_DRIVER = os.environ.get("PVAULT_TEST_CLIPBOARD_DRIVER")
+PREBUILT_OWNER = os.environ.get("PVAULT_TEST_CLIPBOARD_OWNER")
+PREBUILT_HELPER = os.environ.get("PVAULT_TEST_CLIPBOARD_HELPER")
 
 
 def poison_clipboard_child_signal_state() -> None:
@@ -34,9 +37,6 @@ def poison_clipboard_child_signal_state() -> None:
 class ClipboardIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        compiler = shutil.which(os.environ.get("CC", "cc"))
-        if compiler is None:
-            raise unittest.SkipTest("a C compiler is required for clipboard integration tests")
         integration_root = REPOSITORY / "build"
         integration_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         cls._temporary = tempfile.TemporaryDirectory(
@@ -44,6 +44,27 @@ class ClipboardIntegrationTests(unittest.TestCase):
         )
         cls.root = Path(cls._temporary.name)
         cls.root.chmod(0o700)
+        prebuilt = (PREBUILT_DRIVER, PREBUILT_OWNER, PREBUILT_HELPER)
+        if all(prebuilt):
+            cls.driver = Path(PREBUILT_DRIVER or "").resolve()
+            cls.fake_owner = Path(PREBUILT_OWNER or "").resolve()
+            cls.helper = Path(PREBUILT_HELPER or "").resolve()
+            missing = [
+                str(path)
+                for path in (cls.driver, cls.fake_owner, cls.helper)
+                if not path.is_file() or not os.access(path, os.X_OK)
+            ]
+            if missing:
+                raise RuntimeError(
+                    "prebuilt clipboard test executable is missing: " + ", ".join(missing)
+                )
+            return
+        if any(prebuilt):
+            raise RuntimeError("all prebuilt clipboard test executable paths are required")
+
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        if compiler is None:
+            raise unittest.SkipTest("a C compiler is required for clipboard integration tests")
         cls.build = cls.root / "bin"
         cls.build.mkdir(mode=0o700)
         cls.fake_owner = cls.build / "fake-clipboard-owner"
@@ -154,27 +175,32 @@ class ClipboardIntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         new_workers = matching_processes(b"pvault-clip", b"--worker") - self._baseline_workers
+        signalled: set[int] = set()
         for pid in new_workers:
             starttime = process_starttime(pid)
-            self._signal_matching_process(
+            if self._signal_matching_process(
                 pid,
                 starttime,
                 signal.SIGTERM,
                 b"--worker",
-            )
+            ):
+                signalled.add(pid)
         for directory in self.control_directories:
             owner_file = directory / "owner.pid"
             if not owner_file.exists():
                 continue
             try:
                 owner = int(owner_file.read_text(encoding="ascii").strip())
-                self._signal_matching_process(
+                if self._signal_matching_process(
                     owner,
                     self.owner_starttimes.get(owner),
                     signal.SIGKILL,
-                )
+                ):
+                    signalled.add(owner)
             except (OSError, ValueError):
                 pass
+        for pid in signalled:
+            wait_until(lambda pid=pid: not pid_exists(pid), 4.0, "test process cleanup")
 
     def _control(self, prefix: str) -> Path:
         directory = Path(tempfile.mkdtemp(prefix=prefix, dir=self.root))
@@ -191,6 +217,10 @@ class ClipboardIntegrationTests(unittest.TestCase):
             "LC_ALL": "C",
             "PATH": "/usr/bin:/bin",
         }
+        for name in ("ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS"):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
         if backend == "x11":
             environment["DISPLAY"] = ":pvault-integration"
         elif backend == "wayland":

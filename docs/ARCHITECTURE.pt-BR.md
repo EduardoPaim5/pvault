@@ -127,7 +127,9 @@ qualquer divergência dos limites documentados.
 ## 6. Ciclo de vida da memória ao ler uma senha
 
 1. Antes da descriptografia, o processo desabilita core dumps e `ptrace`
-   ordinário com `RLIMIT_CORE=0` e `PR_SET_DUMPABLE=0`.
+   ordinário com `RLIMIT_CORE=0` e `PR_SET_DUMPABLE=0`. O CLI também restaura
+   `SIGCHLD` para a ação default e o desbloqueia antes de criar subprocessos,
+   evitando herdar uma política que impeça wait/reap confiável.
 2. A senha é lida de `/dev/tty`, com echo desabilitado, para memória criada por
    `sodium_malloc` e obrigatoriamente bloqueada por `sodium_mlock`.
 3. Argon2id deriva a KEK em outra região segura. A senha é liberada logo após o
@@ -182,6 +184,9 @@ externo ao núcleo confiável e observa os títulos exibidos.
   atomicamente; depois o diretório é sincronizado.
 - Antes da troca, o snapshot anterior vira backup criptografado. Restore cria
   também um backup pre-restore.
+- A retenção abre uma nova descrição de `backups/` relativa ao `dirfd` já
+  validado em cada varredura; duplicar o fd compartilharia o cursor de diretório
+  e poderia ocultar gerações em alguns filesystems.
 - O restore compara o hash do arquivo novamente lido com o snapshot já
   autenticado, fechando a janela de troca entre confirmação e instalação.
 - Uma falha depois do `rename` é reportada como commit de durabilidade incerta,

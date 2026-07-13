@@ -56,6 +56,23 @@ static const char *sigchld_state(void)
     return "handler";
 }
 
+#ifdef PVAULT_TEST_LSAN_EXIT_NORMALIZE
+static void normalize_lsan_exit_state(void)
+{
+    struct sigaction action;
+    sigset_t child_signal;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    (void)sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGCHLD, &action, NULL);
+    if (sigemptyset(&child_signal) == 0 &&
+        sigaddset(&child_signal, SIGCHLD) == 0) {
+        (void)sigprocmask(SIG_UNBLOCK, &child_signal, NULL);
+    }
+}
+#endif
+
 int main(int argc, char **argv)
 {
     pv_clipboard_job job;
@@ -64,6 +81,12 @@ int main(int argc, char **argv)
     unsigned long ttl;
     char *end = NULL;
     pv_status status;
+
+#ifdef PVAULT_TEST_LSAN_EXIT_NORMALIZE
+    if (atexit(normalize_lsan_exit_state) != 0) {
+        return pv_status_exit_code(PV_ERR_STATE);
+    }
+#endif
 
     if (argc != 3 || argv == NULL ||
         (strcmp(argv[1], "send") != 0 &&

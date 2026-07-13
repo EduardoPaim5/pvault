@@ -299,6 +299,7 @@ typedef enum pv_store_fault_point {
     PV_STORE_FAULT_POINT_COPY_WRITE,
     PV_STORE_FAULT_POINT_COPY_FSYNC,
     PV_STORE_FAULT_POINT_COPY_PARENT_FSYNC,
+    PV_STORE_FAULT_POINT_AUTOMATIC_BACKUP_COLLISION_FSYNC,
     PV_STORE_FAULT_POINT_PRUNE_UNLINK,
     PV_STORE_FAULT_POINT_PRUNE_AFTER_FIRST_UNLINK,
     PV_STORE_FAULT_POINT_PRUNE_DIR_FSYNC,
@@ -345,6 +346,9 @@ pv_status pv_secure_buffer_alloc(pv_buffer *buffer, size_t length);
 pv_status pv_secure_process_hardening(void);
 bool pv_master_password_is_acceptable(const uint8_t *password, size_t password_len);
 void pv_secure_stack_clear(void);
+#ifdef PVAULT_TEST_SECURE_ALLOC_TRACKING
+size_t pv_test_secure_alloc_outstanding(void);
+#endif
 
 bool pv_size_add(size_t a, size_t b, size_t *out);
 bool pv_size_mul(size_t a, size_t b, size_t *out);

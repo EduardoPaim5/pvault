@@ -17,6 +17,7 @@ pkg_check_modules(NCURSESW REQUIRED IMPORTED_TARGET ncursesw)
 
 option(PVAULT_ENABLE_HARDENING "Enable compiler and linker hardening" ON)
 option(PVAULT_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
+option(PVAULT_ENABLE_LSAN "Enable the standalone LeakSanitizer test profile" OFF)
 option(PVAULT_BUILD_FUZZERS "Build libFuzzer targets" OFF)
 option(PVAULT_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(PVAULT_BUILD_INTEGRATION_TESTS "Run Linux PTY/process integration tests" ON)
@@ -27,6 +28,15 @@ option(
 )
 if(PVAULT_BUILD_X11_SYSTEM_TESTS AND NOT BUILD_TESTING)
     message(FATAL_ERROR "PVAULT_BUILD_X11_SYSTEM_TESTS requires BUILD_TESTING=ON")
+endif()
+if(PVAULT_ENABLE_LSAN AND NOT BUILD_TESTING)
+    message(FATAL_ERROR "PVAULT_ENABLE_LSAN is a test-only profile and requires BUILD_TESTING=ON")
+endif()
+if(PVAULT_ENABLE_LSAN AND PVAULT_ENABLE_SANITIZERS)
+    message(FATAL_ERROR "PVAULT_ENABLE_LSAN cannot be combined with PVAULT_ENABLE_SANITIZERS")
+endif()
+if(PVAULT_ENABLE_LSAN AND PVAULT_BUILD_FUZZERS)
+    message(FATAL_ERROR "PVAULT_ENABLE_LSAN cannot be combined with PVAULT_BUILD_FUZZERS")
 endif()
 
 set(CMAKE_C_STANDARD 11)
@@ -146,6 +156,27 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
             "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
     )
     add_dependencies(pvault_clip_test pvault_fake_clipboard_owner)
+    add_executable(
+        pvault_clipboard_test_driver
+        tests/integration/clipboard_driver.c
+        src/clipboard.c
+    )
+    target_include_directories(
+        pvault_clipboard_test_driver
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(pvault_clipboard_test_driver PRIVATE pvault_core)
+    target_compile_definitions(
+        pvault_clipboard_test_driver
+        PRIVATE
+            "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+            "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+    )
+    add_dependencies(
+        pvault_clipboard_test_driver
+        pvault_fake_clipboard_owner
+        pvault_clip_test
+    )
     set(pvault_private_test_directory "${CMAKE_CURRENT_BINARY_DIR}/private-cli-test")
     set_target_properties(
         pvault_rofi_test
@@ -159,12 +190,17 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
             OUTPUT_NAME pvault-clip
             RUNTIME_OUTPUT_DIRECTORY "${pvault_private_test_directory}"
     )
+    set_target_properties(
+        pvault_clipboard_test_driver
+        PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${pvault_private_test_directory}"
+    )
     set(pvault_rofi_test_targets
         pvault_fake_rofi
         pvault_fake_clipboard_owner
         pvault_signal_launcher
         pvault_rofi_test
         pvault_clip_test
+        pvault_clipboard_test_driver
     )
     foreach(target IN LISTS pvault_rofi_test_targets)
         pvault_warnings(${target})
@@ -223,8 +259,93 @@ if(PVAULT_ENABLE_SANITIZERS)
     endforeach()
 endif()
 
+if(PVAULT_ENABLE_LSAN)
+    add_library(
+        pvault_secure_alloc_tracker
+        OBJECT tests/secure_alloc_tracker.c
+    )
+    pvault_warnings(pvault_secure_alloc_tracker)
+    target_compile_options(
+        pvault_secure_alloc_tracker
+        PRIVATE -fsanitize=leak -fno-omit-frame-pointer
+    )
+    function(pvault_track_secure_allocations target)
+        target_sources(
+            ${target}
+            PRIVATE $<TARGET_OBJECTS:pvault_secure_alloc_tracker>
+        )
+        target_link_options(
+            ${target}
+            PRIVATE
+                -Wl,--wrap=sodium_malloc
+                -Wl,--wrap=sodium_free
+        )
+    endfunction()
+
+    set(pvault_lsan_targets pvault_core pvault pvault-clip)
+    if(TARGET pvault_rofi_test)
+        list(APPEND pvault_lsan_targets
+            pvault_rofi_test
+            pvault_clip_test
+            pvault_clipboard_test_driver
+        )
+    endif()
+    if(TARGET pvault_core_test)
+        list(APPEND pvault_lsan_targets pvault_core_test)
+    endif()
+    foreach(target IN LISTS pvault_lsan_targets)
+        target_compile_options(${target} PRIVATE -fsanitize=leak -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=leak)
+    endforeach()
+    foreach(target pvault pvault-clip)
+        pvault_track_secure_allocations(${target})
+    endforeach()
+    if(TARGET pvault_rofi_test)
+        foreach(target
+            pvault_rofi_test
+            pvault_clip_test
+            pvault_clipboard_test_driver
+        )
+            pvault_track_secure_allocations(${target})
+        endforeach()
+    endif()
+    if(TARGET pvault_clipboard_test_driver)
+        target_compile_definitions(
+            pvault_clipboard_test_driver
+            PRIVATE PVAULT_TEST_LSAN_EXIT_NORMALIZE
+        )
+    endif()
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+
+    if(PVAULT_ENABLE_LSAN)
+        add_executable(pvault_lsan_probe tests/lsan_probe.c)
+        target_include_directories(
+            pvault_lsan_probe
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_link_libraries(pvault_lsan_probe PRIVATE pvault_core)
+        target_compile_options(
+            pvault_lsan_probe
+            PRIVATE -fsanitize=leak -fno-omit-frame-pointer
+        )
+        target_link_options(pvault_lsan_probe PRIVATE -fsanitize=leak)
+        pvault_track_secure_allocations(pvault_lsan_probe)
+        pvault_warnings(pvault_lsan_probe)
+        add_test(
+            NAME pvault_lsan_runtime_probe
+            COMMAND
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan_probe.py
+                $<TARGET_FILE:pvault_lsan_probe>
+        )
+        set_tests_properties(
+            pvault_lsan_runtime_probe
+            PROPERTIES LABELS "unit;leak-sanitizer;runtime-probe" TIMEOUT 30
+        )
+    endif()
 
     add_executable(pvault_tests
         tests/test_util.c
@@ -250,6 +371,15 @@ if(BUILD_TESTING)
             -fno-omit-frame-pointer
         )
         target_link_options(pvault_tests PRIVATE -fsanitize=address,undefined)
+    endif()
+    if(PVAULT_ENABLE_LSAN)
+        target_compile_options(pvault_tests PRIVATE -fsanitize=leak -fno-omit-frame-pointer)
+        target_link_options(pvault_tests PRIVATE -fsanitize=leak)
+        target_compile_definitions(
+            pvault_tests
+            PRIVATE PVAULT_TEST_SECURE_ALLOC_TRACKING
+        )
+        pvault_track_secure_allocations(pvault_tests)
     endif()
     add_test(NAME pvault_tests COMMAND pvault_tests)
     set_tests_properties(
@@ -286,6 +416,9 @@ if(BUILD_TESTING)
                 "PVAULT_BUILD_DIR=$<TARGET_FILE_DIR:pvault>"
                 "PVAULT_TEST_ROFI_PVAULT=$<TARGET_FILE:pvault_rofi_test>"
                 "PVAULT_TEST_SIGNAL_LAUNCHER=$<TARGET_FILE:pvault_signal_launcher>"
+                "PVAULT_TEST_CLIPBOARD_DRIVER=$<TARGET_FILE:pvault_clipboard_test_driver>"
+                "PVAULT_TEST_CLIPBOARD_OWNER=$<TARGET_FILE:pvault_fake_clipboard_owner>"
+                "PVAULT_TEST_CLIPBOARD_HELPER=$<TARGET_FILE:pvault_clip_test>"
                 "CC=${CMAKE_C_COMPILER}"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run.py
@@ -365,6 +498,15 @@ if(BUILD_TESTING)
                 target_link_options(${target} PRIVATE -fsanitize=address,undefined)
             endforeach()
         endif()
+        if(PVAULT_ENABLE_LSAN)
+            foreach(target pvault_x11_clipboard_driver pvault_x11_selection_owner)
+                target_compile_options(
+                    ${target}
+                    PRIVATE -fsanitize=leak -fno-omit-frame-pointer
+                )
+                target_link_options(${target} PRIVATE -fsanitize=leak)
+            endforeach()
+        endif()
 
         add_test(
             NAME pvault_x11_system_tests
@@ -408,18 +550,24 @@ if(PVAULT_BUILD_FUZZERS)
     endforeach()
 endif()
 
-install(TARGETS pvault pvault-clip RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES docs/pvault.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 OPTIONAL)
-install(FILES LICENSE COPYRIGHT DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/pvault)
-install(FILES
-    README.md
-    SECURITY.md
-    THREAT_MODEL.md
-    CONTRIBUTING.md
-    docs/FORMAT.md
-    docs/COMPATIBILITY.md
-    docs/ARCHITECTURE.pt-BR.md
-    docs/ROADMAP.pt-BR.md
-    docs/RELEASES.md
-    DESTINATION ${CMAKE_INSTALL_DOCDIR}
-)
+if(PVAULT_ENABLE_LSAN)
+    install(CODE [[
+        message(FATAL_ERROR "The LeakSanitizer test profile is not installable")
+    ]])
+else()
+    install(TARGETS pvault pvault-clip RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES docs/pvault.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 OPTIONAL)
+    install(FILES LICENSE COPYRIGHT DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/pvault)
+    install(FILES
+        README.md
+        SECURITY.md
+        THREAT_MODEL.md
+        CONTRIBUTING.md
+        docs/FORMAT.md
+        docs/COMPATIBILITY.md
+        docs/ARCHITECTURE.pt-BR.md
+        docs/ROADMAP.pt-BR.md
+        docs/RELEASES.md
+        DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    )
+endif()

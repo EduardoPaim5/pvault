@@ -1467,7 +1467,15 @@ static pv_status prune_automatic_backups(
             return PV_ERR_IO;
         }
     }
-    scan_fd = fcntl(held_directory_fd, F_DUPFD_CLOEXEC, 0);
+    /* A duplicated directory fd shares its getdents cursor with the held fd.
+     * Open "." relative to the already-validated directory instead so every
+     * retention pass starts with an independent directory description. */
+    scan_fd = openat(
+        held_directory_fd,
+        ".",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+        0
+    );
     if (scan_fd < 0) {
         return PV_ERR_IO;
     }
@@ -1671,7 +1679,7 @@ static pv_status automatic_backup(
         status = PV_ERR_IO;
     }
     if (status == PV_ERR_EXISTS) {
-        pv_disk_file existing;
+        pv_disk_file existing = {0};
 
         status = read_disk_file_at(*backup_directory_fd, backup_name, &existing);
         if (status == PV_OK &&
@@ -1680,12 +1688,19 @@ static pv_status automatic_backup(
             status = PV_ERR_EXISTS;
         } else if (status == PV_ERR_FORMAT || status == PV_ERR_UNSUPPORTED) {
             status = PV_ERR_EXISTS;
-        } else if (status == PV_OK && store_fsync(*backup_directory_fd) != 0) {
-            status = PV_ERR_IO;
+        } else if (status == PV_OK) {
+#ifdef PVAULT_TEST_FAULT_INJECTION
+            if (store_fault_point_triggered(
+                    PV_STORE_FAULT_POINT_AUTOMATIC_BACKUP_COLLISION_FSYNC
+                )) {
+                status = PV_ERR_IO;
+            } else
+#endif
+            if (store_fsync(*backup_directory_fd) != 0) {
+                status = PV_ERR_IO;
+            }
         }
-        if (status == PV_OK || status == PV_ERR_EXISTS) {
-            disk_file_destroy(&existing);
-        }
+        disk_file_destroy(&existing);
     }
     if (status != PV_OK) {
         (void)store_close(*backup_directory_fd);

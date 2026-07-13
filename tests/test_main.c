@@ -4,6 +4,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -137,6 +138,8 @@ void pv_test_remove_temp_tree(const char *path)
 
 static void process_hardening_is_active(void)
 {
+    struct sigaction child_action;
+    sigset_t blocked;
     struct rlimit core_limit;
     const int result = getrlimit(RLIMIT_CORE, &core_limit);
 
@@ -146,7 +149,18 @@ static void process_hardening_is_active(void)
         PV_CHECK(core_limit.rlim_max == 0U);
     }
     PV_CHECK(prctl(PR_GET_DUMPABLE) == 0);
+    PV_CHECK(sigaction(SIGCHLD, NULL, &child_action) == 0);
+    PV_CHECK(child_action.sa_handler == SIG_DFL);
+    PV_CHECK(sigprocmask(SIG_SETMASK, NULL, &blocked) == 0);
+    PV_CHECK(sigismember(&blocked, SIGCHLD) == 0);
 }
+
+#ifdef PVAULT_TEST_SECURE_ALLOC_TRACKING
+static void secure_allocator_is_balanced(void)
+{
+    PV_CHECK(pv_test_secure_alloc_outstanding() == 0U);
+}
+#endif
 
 int main(void)
 {
@@ -171,6 +185,9 @@ int main(void)
     pv_test_backup_retention_suite();
 #ifdef PVAULT_TEST_FAULT_INJECTION
     pv_test_store_fault_suite();
+#endif
+#ifdef PVAULT_TEST_SECURE_ALLOC_TRACKING
+    pv_test_run("secure_allocator.is_balanced", secure_allocator_is_balanced);
 #endif
 
     pv_global_cleanup();
