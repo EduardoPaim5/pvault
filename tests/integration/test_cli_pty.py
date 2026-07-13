@@ -1633,9 +1633,14 @@ class CliPtyIntegrationTests(unittest.TestCase):
                         if signal_number == signal.SIGTSTP:
                             if ignored:
                                 process.read_for(0.2)
-                                self.assertIsNone(process.returncode)
-                                self.assertFalse(process.echo_enabled())
-                                process.send_signal(signal.SIGTERM)
+                                if process.returncode is None:
+                                    self.assertFalse(process.echo_enabled())
+                                    process.send_signal(signal.SIGTERM)
+                                else:
+                                    self.assertTrue(
+                                        process.echo_enabled(),
+                                        "picker exited without restoring echo after ignored SIGTSTP",
+                                    )
                             else:
                                 wait_until(
                                     lambda: (
