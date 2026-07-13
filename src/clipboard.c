@@ -30,6 +30,9 @@
 #define PV_CLIP_SETUP_MAGIC UINT32_C(0x50435631)
 #define PV_CLIP_SETUP_TIMEOUT_MS 5000
 #define PV_CLIP_OWNER_GRACE_MS 250
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+#define PV_CLIP_CLEAR_TIMEOUT_MS 500
+#endif
 #define PV_CLIP_FALLBACK_POLL_MS 100
 #define PV_CLIP_DATA_FD 3
 #define PV_CLIP_CONTROL_FD 4
@@ -39,8 +42,15 @@
 #define PV_XCLIP_PATH "/usr/bin/xclip"
 #endif
 
+#if defined(PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD) && \
+    defined(PVAULT_INSTALLABLE_CLIPBOARD)
+#error "experimental Wayland clipboard code must not enter installable targets"
+#endif
+
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
 #ifndef PV_WL_COPY_PATH
 #define PV_WL_COPY_PATH "/usr/bin/wl-copy"
+#endif
 #endif
 
 enum pv_clip_message {
@@ -55,7 +65,9 @@ enum pv_clip_message {
 enum pv_clip_backend {
     PV_CLIP_BACKEND_NONE = 0,
     PV_CLIP_BACKEND_X11,
-    PV_CLIP_BACKEND_WAYLAND
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+    PV_CLIP_BACKEND_WAYLAND,
+#endif
 };
 
 struct pv_clip_setup_result {
@@ -341,11 +353,23 @@ static int poll_one(int fd, short events, int timeout_ms)
 static enum pv_clip_backend choose_backend(void)
 {
     const char *wayland_display = getenv("WAYLAND_DISPLAY");
+    const char *session_type = getenv("XDG_SESSION_TYPE");
     const char *x11_display = getenv("DISPLAY");
 
-    if (wayland_display != NULL && wayland_display[0] != '\0' &&
-        access(PV_WL_COPY_PATH, X_OK) == 0) {
-        return PV_CLIP_BACKEND_WAYLAND;
+    if ((wayland_display != NULL && wayland_display[0] != '\0') ||
+        (session_type != NULL && strcmp(session_type, "wayland") == 0)) {
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+        if (wayland_display != NULL && wayland_display[0] != '\0' &&
+            access(PV_WL_COPY_PATH, X_OK) == 0) {
+            return PV_CLIP_BACKEND_WAYLAND;
+        }
+#endif
+        return PV_CLIP_BACKEND_NONE;
+    }
+    /* DISPLAY alone is not evidence of a native X11 session: it can point to
+     * XWayland.  Unknown or missing session metadata therefore fails closed. */
+    if (session_type == NULL || strcmp(session_type, "x11") != 0) {
+        return PV_CLIP_BACKEND_NONE;
     }
     if (x11_display != NULL && x11_display[0] != '\0' &&
         access(PV_XCLIP_PATH, X_OK) == 0) {
@@ -361,13 +385,17 @@ static bool env_key_is_allowed(const char *entry)
     static const char *const keys[] = {
         "DISPLAY=",
         "XAUTHORITY=",
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
         "WAYLAND_DISPLAY=",
         "XDG_RUNTIME_DIR=",
+#endif
         "HOME=",
         "LANG=",
         "LC_ALL=",
         "LC_CTYPE=",
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
         "DBUS_SESSION_BUS_ADDRESS="
+#endif
     };
     size_t index;
 
@@ -629,6 +657,10 @@ static void owner_exec(enum pv_clip_backend backend,
     char *environment[16];
     int saved_errno;
 
+#ifndef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+    (void)backend;
+    (void)text_content;
+#endif
     if (normalize_child_signal_state() != 0) {
         saved_errno = errno;
         (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
@@ -667,6 +699,7 @@ static void owner_exec(enum pv_clip_backend backend,
     (void)set_cloexec(error_fd);
     close_fds_from(7U);
 
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
     if (backend == PV_CLIP_BACKEND_WAYLAND) {
         char argument_program[] = "wl-copy";
         char argument_foreground[] = "--foreground";
@@ -681,7 +714,9 @@ static void owner_exec(enum pv_clip_backend backend,
             NULL
         };
         execve(PV_WL_COPY_PATH, arguments, environment);
-    } else {
+    } else
+#endif
+    {
         char argument_program[] = "xclip";
         char argument_selection[] = "-selection";
         char argument_clipboard[] = "clipboard";
@@ -743,6 +778,97 @@ static pid_t spawn_owner(
     return (pid_t)-1;
 }
 
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+static void wayland_clear_exec(int error_fd, pid_t expected_parent)
+{
+    char *environment[16];
+    int saved_errno;
+
+    if (normalize_child_signal_state() != 0) {
+        saved_errno = errno;
+        (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+        _exit(126);
+    }
+    harden_clip_process();
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
+        saved_errno = errno;
+        (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+        _exit(126);
+    }
+    if (getppid() != expected_parent) {
+        saved_errno = ECHILD;
+        (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+        _exit(126);
+    }
+    if (redirect_standard_fds() != 0) {
+        saved_errno = errno;
+        (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+        _exit(126);
+    }
+    (void)build_owner_environment(environment, sizeof(environment) / sizeof(environment[0]));
+
+    if (error_fd != 6) {
+        if (dup2(error_fd, 6) < 0) {
+            _exit(126);
+        }
+        error_fd = 6;
+    }
+    (void)set_cloexec(error_fd);
+    close_fds_from(7U);
+
+    {
+        char argument_program[] = "wl-copy";
+        char argument_clear[] = "--clear";
+        char *const arguments[] = {
+            argument_program,
+            argument_clear,
+            NULL
+        };
+
+        execve(PV_WL_COPY_PATH, arguments, environment);
+    }
+    saved_errno = errno;
+    (void)write_all(error_fd, &saved_errno, sizeof(saved_errno));
+    _exit(127);
+}
+
+static pid_t spawn_wayland_clear(void)
+{
+    int error_pipe[2] = {-1, -1};
+    pid_t child;
+    const pid_t expected_parent = getpid();
+    int child_errno = 0;
+    ssize_t received;
+
+    if (pipe2(error_pipe, O_CLOEXEC) != 0) {
+        return (pid_t)-1;
+    }
+    child = fork();
+    if (child < 0) {
+        close_if_open(&error_pipe[0]);
+        close_if_open(&error_pipe[1]);
+        return (pid_t)-1;
+    }
+    if (child == 0) {
+        (void)close(error_pipe[0]);
+        wayland_clear_exec(error_pipe[1], expected_parent);
+    }
+
+    close_if_open(&error_pipe[1]);
+    do {
+        received = read(error_pipe[0], &child_errno, sizeof(child_errno));
+    } while (received < 0 && errno == EINTR);
+    close_if_open(&error_pipe[0]);
+    if (received == 0) {
+        return child;
+    }
+
+    (void)waitpid_nointr(child, NULL, 0);
+    errno = received > 0 ? child_errno : EIO;
+    return (pid_t)-1;
+}
+#endif
+
 static bool owner_has_exited(pid_t owner)
 {
     int status = 0;
@@ -791,6 +917,56 @@ static void terminate_owner(pid_t owner, int owner_pidfd)
     }
     (void)waitpid_nointr(owner, NULL, 0);
 }
+
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+static bool wait_for_child_exit(pid_t child, int child_pidfd, int timeout_ms)
+{
+    int elapsed_ms = 0;
+
+    while (elapsed_ms < timeout_ms && !pv_clip_stop_requested) {
+        int status = 0;
+        int result = waitpid_nointr(child, &status, WNOHANG);
+
+        if (result == (int)child) {
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        }
+        if (result < 0) {
+            return false;
+        }
+        if (child_pidfd >= 0) {
+            int remaining_ms = timeout_ms - elapsed_ms;
+            int slice_ms = remaining_ms < 50 ? remaining_ms : 50;
+            int ready = poll_one(child_pidfd, POLLIN, slice_ms);
+
+            if (ready < 0) {
+                return false;
+            }
+            elapsed_ms += slice_ms;
+        } else {
+            const struct timespec pause_time = {.tv_sec = 0, .tv_nsec = 10000000L};
+
+            (void)nanosleep(&pause_time, NULL);
+            elapsed_ms += 10;
+        }
+    }
+    return false;
+}
+
+static void clear_wayland_selection_best_effort(void)
+{
+    pid_t child = spawn_wayland_clear();
+    int child_pidfd;
+
+    if (child < 0) {
+        return;
+    }
+    child_pidfd = pidfd_open_local(child);
+    if (!wait_for_child_exit(child, child_pidfd, PV_CLIP_CLEAR_TIMEOUT_MS)) {
+        terminate_owner(child, child_pidfd);
+    }
+    close_if_open(&child_pidfd);
+}
+#endif
 
 static int wait_for_done(int control_fd, pid_t owner, int owner_pidfd)
 {
@@ -1004,6 +1180,11 @@ report_setup:
             goto cleanup;
         }
         if (wait_result > 0) {
+#ifdef PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+            if (backend == PV_CLIP_BACKEND_WAYLAND && !owner_has_exited(owner)) {
+                clear_wayland_selection_best_effort();
+            }
+#endif
             terminate_owner(owner, owner_pidfd);
             owner = (pid_t)-1;
         } else {

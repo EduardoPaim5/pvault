@@ -133,6 +133,34 @@ jobs:
       - name: Exercise the real X11 clipboard owner
         run: ./scripts/test-real-x11.sh
 
+  real-wayland-clipboard:
+    name: Wayland retention characterization (non-installable)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      options: --init --ulimit core=0:0 --ulimit memlock=8388608:8388608
+    steps:
+      - name: Install Wayland test dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja pkgconf libsodium libcbor ncurses xclip
+          weston wl-clipboard
+          gcc git python
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Trust and verify Git checkout
+        run: |
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse --is-inside-work-tree)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git ls-files --error-unmatch .github/workflows/ci.yml >/dev/null
+      - name: Reproduce the Weston retention boundary
+        run: ./scripts/test-real-wayland.sh
+
   reproducibility:
     name: Reproducible install tree
     runs-on: ubuntu-24.04

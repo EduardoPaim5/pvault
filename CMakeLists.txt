@@ -26,8 +26,16 @@ option(
     "Run disposable-X11 system tests with the real xclip"
     OFF
 )
+option(
+    PVAULT_BUILD_WAYLAND_SYSTEM_TESTS
+    "Characterize the non-installable experimental wl-copy backend on disposable Wayland"
+    OFF
+)
 if(PVAULT_BUILD_X11_SYSTEM_TESTS AND NOT BUILD_TESTING)
     message(FATAL_ERROR "PVAULT_BUILD_X11_SYSTEM_TESTS requires BUILD_TESTING=ON")
+endif()
+if(PVAULT_BUILD_WAYLAND_SYSTEM_TESTS AND NOT BUILD_TESTING)
+    message(FATAL_ERROR "PVAULT_BUILD_WAYLAND_SYSTEM_TESTS requires BUILD_TESTING=ON")
 endif()
 if(PVAULT_ENABLE_LSAN AND NOT BUILD_TESTING)
     message(FATAL_ERROR "PVAULT_ENABLE_LSAN is a test-only profile and requires BUILD_TESTING=ON")
@@ -101,6 +109,7 @@ add_executable(pvault
 )
 target_include_directories(pvault PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pvault PRIVATE pvault_core PkgConfig::NCURSESW)
+target_compile_definitions(pvault PRIVATE PVAULT_INSTALLABLE_CLIPBOARD)
 pvault_warnings(pvault)
 
 add_executable(pvault-clip
@@ -109,6 +118,7 @@ add_executable(pvault-clip
 )
 target_include_directories(pvault-clip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pvault-clip PRIVATE pvault_core)
+target_compile_definitions(pvault-clip PRIVATE PVAULT_INSTALLABLE_CLIPBOARD)
 pvault_warnings(pvault-clip)
 
 if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
@@ -132,6 +142,7 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
     target_compile_definitions(
         pvault_rofi_test
         PRIVATE
+            PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
             "PVAULT_ROFI_EXECUTABLE=\"$<TARGET_FILE:pvault_fake_rofi>\""
             "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
             "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
@@ -152,6 +163,7 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
     target_compile_definitions(
         pvault_clip_test
         PRIVATE
+            PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
             "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
             "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
     )
@@ -169,6 +181,7 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
     target_compile_definitions(
         pvault_clipboard_test_driver
         PRIVATE
+            PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
             "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
             "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
     )
@@ -207,10 +220,28 @@ if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
     endforeach()
 endif()
 
-# Persistence fault injection is compiled into a test-only copy of the core.
-# The production binaries always link pvault_core, which has no fault-control
-# API or mutable injection state.
 if(BUILD_TESTING)
+    add_executable(
+        pvault_clipboard_policy_test
+        tests/clipboard_policy_test.c
+        src/clipboard.c
+    )
+    target_include_directories(
+        pvault_clipboard_policy_test
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(pvault_clipboard_policy_test PRIVATE pvault_core)
+    target_compile_definitions(
+        pvault_clipboard_policy_test
+        PRIVATE
+            PVAULT_INSTALLABLE_CLIPBOARD
+            "PV_XCLIP_PATH=\"/bin/true\""
+    )
+    pvault_warnings(pvault_clipboard_policy_test)
+
+    # Persistence fault injection is compiled into a test-only copy of the core.
+    # The production binaries always link pvault_core, which has no fault-control
+    # API or mutable injection state.
     add_library(pvault_core_test STATIC ${PVAULT_CORE_SOURCES})
     target_include_directories(pvault_core_test
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -229,6 +260,9 @@ if(PVAULT_ENABLE_HARDENING)
     if(TARGET pvault_core_test)
         list(APPEND pvault_hardened_targets pvault_core_test)
     endif()
+    if(TARGET pvault_clipboard_policy_test)
+        list(APPEND pvault_hardened_targets pvault_clipboard_policy_test)
+    endif()
     foreach(target IN LISTS pvault_hardened_targets)
         target_compile_definitions(${target} PRIVATE $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=3>)
         target_compile_options(${target} PRIVATE
@@ -240,6 +274,12 @@ if(PVAULT_ENABLE_HARDENING)
     endforeach()
     target_link_options(pvault PRIVATE -Wl,-z,relro,-z,now -pie)
     target_link_options(pvault-clip PRIVATE -Wl,-z,relro,-z,now -pie)
+    if(TARGET pvault_clipboard_policy_test)
+        target_link_options(
+            pvault_clipboard_policy_test
+            PRIVATE -Wl,-z,relro,-z,now -pie
+        )
+    endif()
     foreach(target IN LISTS pvault_rofi_test_targets)
         target_link_options(${target} PRIVATE -Wl,-z,relro,-z,now -pie)
     endforeach()
@@ -252,6 +292,9 @@ if(PVAULT_ENABLE_SANITIZERS)
     endif()
     if(TARGET pvault_core_test)
         list(APPEND pvault_sanitized_targets pvault_core_test)
+    endif()
+    if(TARGET pvault_clipboard_policy_test)
+        list(APPEND pvault_sanitized_targets pvault_clipboard_policy_test)
     endif()
     foreach(target IN LISTS pvault_sanitized_targets)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -293,6 +336,9 @@ if(PVAULT_ENABLE_LSAN)
     if(TARGET pvault_core_test)
         list(APPEND pvault_lsan_targets pvault_core_test)
     endif()
+    if(TARGET pvault_clipboard_policy_test)
+        list(APPEND pvault_lsan_targets pvault_clipboard_policy_test)
+    endif()
     foreach(target IN LISTS pvault_lsan_targets)
         target_compile_options(${target} PRIVATE -fsanitize=leak -fno-omit-frame-pointer)
         target_link_options(${target} PRIVATE -fsanitize=leak)
@@ -300,6 +346,9 @@ if(PVAULT_ENABLE_LSAN)
     foreach(target pvault pvault-clip)
         pvault_track_secure_allocations(${target})
     endforeach()
+    if(TARGET pvault_clipboard_policy_test)
+        pvault_track_secure_allocations(pvault_clipboard_policy_test)
+    endif()
     if(TARGET pvault_rofi_test)
         foreach(target
             pvault_rofi_test
@@ -319,6 +368,12 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+
+    add_test(NAME pvault_clipboard_policy_test COMMAND pvault_clipboard_policy_test)
+    set_tests_properties(
+        pvault_clipboard_policy_test
+        PROPERTIES LABELS "unit;security;clipboard-policy" TIMEOUT 30
+    )
 
     if(PVAULT_ENABLE_LSAN)
         add_executable(pvault_lsan_probe tests/lsan_probe.c)
@@ -521,6 +576,129 @@ if(BUILD_TESTING)
         set_tests_properties(
             pvault_x11_system_tests
             PROPERTIES LABELS "system;real-clipboard;x11" TIMEOUT 45
+        )
+    endif()
+
+    if(PVAULT_BUILD_WAYLAND_SYSTEM_TESTS)
+        if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            message(FATAL_ERROR "PVAULT_BUILD_WAYLAND_SYSTEM_TESTS currently requires Linux")
+        endif()
+        find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+        find_program(PVAULT_WESTON_EXECUTABLE NAMES weston REQUIRED)
+        find_program(PVAULT_WL_COPY_EXECUTABLE NAMES wl-copy REQUIRED)
+        find_program(PVAULT_WL_PASTE_EXECUTABLE NAMES wl-paste REQUIRED)
+
+        add_executable(
+            pvault_wayland_clipboard_driver
+            tests/integration/clipboard_driver.c
+            src/clipboard.c
+        )
+        add_executable(
+            pvault_wayland_clip_test
+            src/clip_main.c
+            src/clipboard.c
+        )
+        target_include_directories(
+            pvault_wayland_clipboard_driver
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_include_directories(
+            pvault_wayland_clip_test
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_link_libraries(pvault_wayland_clipboard_driver PRIVATE pvault_core)
+        target_link_libraries(pvault_wayland_clip_test PRIVATE pvault_core)
+        target_compile_definitions(
+            pvault_wayland_clipboard_driver
+            PRIVATE
+                PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+                "PV_WL_COPY_PATH=\"${PVAULT_WL_COPY_EXECUTABLE}\""
+        )
+        target_compile_definitions(
+            pvault_wayland_clip_test
+            PRIVATE
+                PVAULT_EXPERIMENTAL_WAYLAND_CLIPBOARD
+                "PV_WL_COPY_PATH=\"${PVAULT_WL_COPY_EXECUTABLE}\""
+        )
+        set(
+            pvault_wayland_test_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/private-wayland-test"
+        )
+        set_target_properties(
+            pvault_wayland_clipboard_driver
+            PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${pvault_wayland_test_directory}"
+        )
+        set_target_properties(
+            pvault_wayland_clip_test
+            PROPERTIES
+                OUTPUT_NAME pvault-clip
+                RUNTIME_OUTPUT_DIRECTORY "${pvault_wayland_test_directory}"
+        )
+        add_dependencies(pvault_wayland_clipboard_driver pvault_wayland_clip_test)
+        set(
+            pvault_wayland_system_targets
+            pvault_wayland_clipboard_driver
+            pvault_wayland_clip_test
+        )
+        foreach(target IN LISTS pvault_wayland_system_targets)
+            pvault_warnings(${target})
+        endforeach()
+
+        if(PVAULT_ENABLE_HARDENING)
+            foreach(target IN LISTS pvault_wayland_system_targets)
+                target_compile_definitions(
+                    ${target}
+                    PRIVATE $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=3>
+                )
+                target_compile_options(${target} PRIVATE
+                    -fstack-protector-strong
+                    -fPIE
+                    -fno-delete-null-pointer-checks
+                    -fno-strict-overflow
+                )
+                target_link_options(${target} PRIVATE -Wl,-z,relro,-z,now -pie)
+            endforeach()
+        endif()
+        if(PVAULT_ENABLE_SANITIZERS)
+            foreach(target IN LISTS pvault_wayland_system_targets)
+                target_compile_options(${target} PRIVATE
+                    -fsanitize=address,undefined
+                    -fno-omit-frame-pointer
+                )
+                target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+            endforeach()
+        endif()
+        if(PVAULT_ENABLE_LSAN)
+            foreach(target IN LISTS pvault_wayland_system_targets)
+                target_compile_options(
+                    ${target}
+                    PRIVATE -fsanitize=leak -fno-omit-frame-pointer
+                )
+                target_link_options(${target} PRIVATE -fsanitize=leak)
+                pvault_track_secure_allocations(${target})
+            endforeach()
+            target_compile_definitions(
+                pvault_wayland_clipboard_driver
+                PRIVATE PVAULT_TEST_LSAN_EXIT_NORMALIZE
+            )
+        endif()
+
+        add_test(
+            NAME pvault_wayland_system_tests
+            COMMAND
+                ${CMAKE_COMMAND} -E env
+                "PVAULT_WAYLAND_DRIVER=$<TARGET_FILE:pvault_wayland_clipboard_driver>"
+                "PVAULT_WESTON=${PVAULT_WESTON_EXECUTABLE}"
+                "PVAULT_WL_COPY=${PVAULT_WL_COPY_EXECUTABLE}"
+                "PVAULT_WL_PASTE=${PVAULT_WL_PASTE_EXECUTABLE}"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/system/test_wlcopy_wayland.py
+        )
+        set_tests_properties(
+            pvault_wayland_system_tests
+            PROPERTIES
+                LABELS "system;security-characterization;wayland;non-installable"
+                TIMEOUT 45
         )
     endif()
 endif()
