@@ -171,6 +171,113 @@ class PtyProcess:
         self.close()
 
 
+class SplitPtyProcess(PtyProcess):
+    """Child with a controlling terminal and stdout captured separately.
+
+    The child's stdin and stderr remain attached to the controlling PTY, while
+    stdout is redirected to a pipe.  ``expect()`` and ``output`` continue to
+    refer to the terminal stream; redirected output is available in
+    ``stdout``.  This is useful for testing commands which must reject a
+    non-terminal stdout before prompting for a secret.
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | os.PathLike[str],
+        env: Mapping[str, str],
+    ) -> None:
+        self.argv = tuple(os.fspath(item) for item in argv)
+        self.env = dict(env)
+        self.output = bytearray()
+        self.stdout = bytearray()
+        self._secrets: list[bytes] = []
+        self._search_position = 0
+        self._eof = False
+        self._stdout_eof = False
+        self.returncode: int | None = None
+
+        stdout_read_fd, stdout_write_fd = os.pipe()
+        try:
+            pid, master_fd = pty.fork()
+        except BaseException:
+            os.close(stdout_read_fd)
+            os.close(stdout_write_fd)
+            raise
+        if pid == 0:
+            try:
+                os.close(stdout_read_fd)
+                os.dup2(stdout_write_fd, 1)
+                if stdout_write_fd != 1:
+                    os.close(stdout_write_fd)
+                os.chdir(cwd)
+                os.execvpe(self.argv[0], list(self.argv), self.env)
+            except BaseException as error:  # pragma: no cover - child-only diagnostic
+                message = f"PTY exec failed: {error}\n".encode("utf-8", "replace")
+                os.write(2, message)
+                os._exit(127)
+
+        os.close(stdout_write_fd)
+        self.pid = pid
+        self.master_fd = master_fd
+        self.stdout_fd = stdout_read_fd
+        os.set_blocking(self.master_fd, False)
+        os.set_blocking(self.stdout_fd, False)
+
+    def _read_stream(self, fd: int, destination: bytearray, *, terminal: bool) -> bool:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError as error:
+            if terminal and error.errno == errno.EIO:
+                self._eof = True
+                return False
+            if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return False
+            raise
+        if not chunk:
+            if terminal:
+                self._eof = True
+            else:
+                self._stdout_eof = True
+            return False
+        destination.extend(chunk)
+        return True
+
+    def _read_once(self, timeout: float) -> bool:
+        descriptors: list[int] = []
+
+        if not self._eof:
+            descriptors.append(self.master_fd)
+        if not self._stdout_eof:
+            descriptors.append(self.stdout_fd)
+        if not descriptors:
+            if timeout > 0.0:
+                time.sleep(timeout)
+            return False
+        readable, _, _ = select.select(descriptors, [], [], max(0.0, timeout))
+        received = False
+        for fd in readable:
+            if fd == self.master_fd:
+                received = self._read_stream(fd, self.output, terminal=True) or received
+            else:
+                received = self._read_stream(fd, self.stdout, terminal=False) or received
+        return received
+
+    def safe_stdout(self) -> bytes:
+        redacted = bytes(self.stdout)
+        for secret in self._secrets:
+            redacted = redacted.replace(secret, b"<redacted>")
+        return redacted
+
+    def close(self) -> None:
+        super().close()
+        try:
+            os.close(self.stdout_fd)
+        except OSError:
+            pass
+
+
 def isolated_environment(root: Path) -> dict[str, str]:
     home = root / "home"
     config = root / "config"
@@ -210,6 +317,22 @@ def process_state(pid: int) -> str | None:
         if line.startswith(b"State:"):
             fields = line.split()
             return fields[1].decode("ascii", "replace") if len(fields) >= 2 else None
+    return None
+
+
+def process_signal_ignored(pid: int, signal_number: int) -> bool | None:
+    status = process_file(pid, "status")
+
+    if status is None or signal_number <= 0:
+        return None
+    for line in status.splitlines():
+        if not line.startswith(b"SigIgn:"):
+            continue
+        try:
+            mask = int(line.split()[1], 16)
+        except (IndexError, ValueError):
+            return None
+        return bool(mask & (1 << (signal_number - 1)))
     return None
 
 

@@ -101,6 +101,76 @@ target_include_directories(pvault-clip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pvault-clip PRIVATE pvault_core)
 pvault_warnings(pvault-clip)
 
+if(BUILD_TESTING AND PVAULT_BUILD_INTEGRATION_TESTS)
+    add_executable(pvault_fake_rofi tests/integration/fake_rofi.c)
+    add_executable(
+        pvault_fake_clipboard_owner
+        tests/integration/fake_clipboard_owner.c
+    )
+    target_link_libraries(pvault_fake_clipboard_owner PRIVATE PkgConfig::SODIUM)
+    add_executable(pvault_signal_launcher tests/integration/signal_launcher.c)
+    add_executable(pvault_rofi_test
+        src/cli.c
+        src/clipboard.c
+        src/main.c
+        src/shell.c
+        src/tty.c
+        src/ui.c
+    )
+    target_include_directories(pvault_rofi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pvault_rofi_test PRIVATE pvault_core PkgConfig::NCURSESW)
+    target_compile_definitions(
+        pvault_rofi_test
+        PRIVATE
+            "PVAULT_ROFI_EXECUTABLE=\"$<TARGET_FILE:pvault_fake_rofi>\""
+            "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+            "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+    )
+    add_dependencies(
+        pvault_rofi_test
+        pvault_fake_rofi
+        pvault_fake_clipboard_owner
+        pvault_signal_launcher
+    )
+    add_executable(
+        pvault_clip_test
+        src/clip_main.c
+        src/clipboard.c
+    )
+    target_include_directories(pvault_clip_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pvault_clip_test PRIVATE pvault_core)
+    target_compile_definitions(
+        pvault_clip_test
+        PRIVATE
+            "PV_XCLIP_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+            "PV_WL_COPY_PATH=\"$<TARGET_FILE:pvault_fake_clipboard_owner>\""
+    )
+    add_dependencies(pvault_clip_test pvault_fake_clipboard_owner)
+    set(pvault_private_test_directory "${CMAKE_CURRENT_BINARY_DIR}/private-cli-test")
+    set_target_properties(
+        pvault_rofi_test
+        PROPERTIES
+            OUTPUT_NAME pvault
+            RUNTIME_OUTPUT_DIRECTORY "${pvault_private_test_directory}"
+    )
+    set_target_properties(
+        pvault_clip_test
+        PROPERTIES
+            OUTPUT_NAME pvault-clip
+            RUNTIME_OUTPUT_DIRECTORY "${pvault_private_test_directory}"
+    )
+    set(pvault_rofi_test_targets
+        pvault_fake_rofi
+        pvault_fake_clipboard_owner
+        pvault_signal_launcher
+        pvault_rofi_test
+        pvault_clip_test
+    )
+    foreach(target IN LISTS pvault_rofi_test_targets)
+        pvault_warnings(${target})
+    endforeach()
+endif()
+
 # Persistence fault injection is compiled into a test-only copy of the core.
 # The production binaries always link pvault_core, which has no fault-control
 # API or mutable injection state.
@@ -117,6 +187,9 @@ endif()
 
 if(PVAULT_ENABLE_HARDENING)
     set(pvault_hardened_targets pvault_core pvault pvault-clip)
+    if(pvault_rofi_test_targets)
+        list(APPEND pvault_hardened_targets ${pvault_rofi_test_targets})
+    endif()
     if(TARGET pvault_core_test)
         list(APPEND pvault_hardened_targets pvault_core_test)
     endif()
@@ -131,10 +204,16 @@ if(PVAULT_ENABLE_HARDENING)
     endforeach()
     target_link_options(pvault PRIVATE -Wl,-z,relro,-z,now -pie)
     target_link_options(pvault-clip PRIVATE -Wl,-z,relro,-z,now -pie)
+    foreach(target IN LISTS pvault_rofi_test_targets)
+        target_link_options(${target} PRIVATE -Wl,-z,relro,-z,now -pie)
+    endforeach()
 endif()
 
 if(PVAULT_ENABLE_SANITIZERS)
     set(pvault_sanitized_targets pvault_core pvault pvault-clip)
+    if(pvault_rofi_test_targets)
+        list(APPEND pvault_sanitized_targets ${pvault_rofi_test_targets})
+    endif()
     if(TARGET pvault_core_test)
         list(APPEND pvault_sanitized_targets pvault_core_test)
     endif()
@@ -148,6 +227,7 @@ if(BUILD_TESTING)
     find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
     add_executable(pvault_tests
+        tests/test_util.c
         tests/test_main.c
         tests/test_cbor.c
         tests/test_compat.c
@@ -204,6 +284,8 @@ if(BUILD_TESTING)
             COMMAND
                 ${CMAKE_COMMAND} -E env
                 "PVAULT_BUILD_DIR=$<TARGET_FILE_DIR:pvault>"
+                "PVAULT_TEST_ROFI_PVAULT=$<TARGET_FILE:pvault_rofi_test>"
+                "PVAULT_TEST_SIGNAL_LAUNCHER=$<TARGET_FILE:pvault_signal_launcher>"
                 "CC=${CMAKE_C_COMPILER}"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run.py

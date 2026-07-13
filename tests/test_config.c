@@ -113,7 +113,6 @@ static bool config_fixture_init(config_fixture *const fixture)
 {
     bool saved_config = false;
     bool saved_data = false;
-    bool saved_home = false;
 
     if (fixture == NULL) {
         return false;
@@ -142,7 +141,6 @@ static bool config_fixture_init(config_fixture *const fixture)
         )) {
         goto fail;
     }
-    saved_home = true;
     fixture->environment_saved = true;
 
     if (!pv_test_make_temp_dir(fixture->root, sizeof(fixture->root)) ||
@@ -184,9 +182,6 @@ static bool config_fixture_init(config_fixture *const fixture)
     return true;
 
 fail:
-    if (saved_home) {
-        free(fixture->saved_environment.home);
-    }
     if (saved_data) {
         free(fixture->saved_environment.xdg_data_home);
     }

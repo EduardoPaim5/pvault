@@ -7,6 +7,10 @@ format and CLI. It is a design contract, not a security certification. Android,
 network synchronization, browser extensions, TOTP, attachments, and shared
 vaults are outside this version's boundary.
 
+PVault remains pre-alpha and has not received an independent security audit.
+The properties below must not be interpreted as approval to store real
+credentials or the only copy of important data.
+
 ## Assets
 
 PVault treats the following as secrets or integrity-sensitive state:
@@ -39,9 +43,11 @@ PVault trusts:
 `xclip`, `wl-copy`, optional `rofi`, the X11/Wayland compositor, terminal,
 window manager, and clipboard manager are outside the cryptographic core. Once
 a password is sent to the clipboard owner, those components can observe or
-retain it. Opting into rofi exposes each displayed record title and hexadecimal
-record identifier to that external process; the in-process picker is the
-default.
+retain it. Opting into rofi exposes each sanitized display title and a random
+token valid only for that picker invocation to the external process. The token
+is not the persistent record identifier. Rofi receives only an allowlisted
+display, runtime, authentication, home, and locale environment, but remains
+outside the trusted core. The in-process picker is the default.
 
 ## Adversaries considered
 
@@ -114,6 +120,30 @@ mode metadata, duplicate keys, embedded NUL bytes, and oversized input fail
 closed. Parsing occurs into a temporary configuration and is committed only
 after the complete file is valid.
 
+### CLI metadata boundary
+
+Record selectors are treated as protected metadata. `edit`, `remove`, `show`,
+and `copy` are queryless and select through the in-process picker attached to
+`/dev/tty`. Earlier pre-alpha positional selectors are rejected rather than
+silently reinterpreted. Supported invocations therefore do not require a title,
+username, URL, tag, or persistent record ID in process arguments or ordinary
+shell history. Rejection cannot retract an argument that the user already gave
+to the shell and kernel, so legacy forms must be tested only with synthetic
+text. When copying a custom field, `--field custom` lists sanitized names on
+`/dev/tty` and selects one by ordinal; duplicate names remain addressable and
+arbitrary custom names are not accepted in supported `argv`. Successful `add`
+and `edit` status messages do not contain
+record identifiers.
+
+Decrypted metadata from `list`, `show`, and a non-copying `pick` is emitted to
+stdout only when stdout is a terminal. Authenticated identity from
+`rescue verify` follows the same rule. `--allow-redirect` is an explicit opt-in
+that permits those bytes to reach a caller-chosen non-terminal destination; it
+does not make that destination private, encrypted, short-lived, or safe from
+logs. The interactive `shell` requires both stdin and stdout to be terminals.
+The terminal itself remains trusted as stated above, and terminal recording is
+outside this boundary.
+
 ### Memory lifecycle
 
 Master passwords, recovery material, VMK, derived keys, generated passwords,
@@ -181,7 +211,9 @@ Rescue is not a permissive parser or repair mode. Structural inspection labels
 the declared header values unauthenticated and never parses the body. Verification
 requires a password or recovery key, successful keyslot unlock, complete body
 AEAD authentication, canonical CBOR, and semantic validation before reporting
-authenticated metadata. It never emits plaintext records.
+authenticated metadata. It never emits plaintext records, and refuses to send
+authenticated identity to redirected stdout unless `--allow-redirect` was
+given explicitly.
 
 Authenticated recovery and application rollback publish a byte-exact encrypted
 copy to a new, non-existing path. The temporary file is private, synchronized,
@@ -234,6 +266,8 @@ Users are expected to:
 - use encrypted swap or disable swap and avoid unencrypted hibernation;
 - keep the recovery key separate from encrypted backups;
 - test recovery with synthetic data before relying on it;
+- use `--allow-redirect` only for an intentional destination whose permissions,
+  lifetime, logs, and downstream consumers they have evaluated;
 - avoid persistent clipboard managers or configure them to ignore sensitive
   selections; and
 - lock the vault before leaving the session.

@@ -25,6 +25,7 @@ bool pv_test_make_temp_dir(char *path, size_t path_size);
 void pv_test_remove_temp_tree(const char *path);
 
 void pv_test_crypto_suite(void);
+void pv_test_util_suite(void);
 void pv_test_cbor_suite(void);
 void pv_test_compat_suite(void);
 void pv_test_config_suite(void);

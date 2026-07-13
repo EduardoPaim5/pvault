@@ -2,12 +2,21 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+
+extern char **environ;
+
+#ifndef PVAULT_ROFI_EXECUTABLE
+#define PVAULT_ROFI_EXECUTABLE "/usr/bin/rofi"
+#endif
 
 typedef struct record_form {
     pv_buffer title;
@@ -31,6 +40,18 @@ typedef struct rofi_job {
     int output_fd;
     pid_t pid;
 } rofi_job;
+
+typedef struct rofi_entry {
+    uint8_t token[8];
+    pv_record *record;
+} rofi_entry;
+
+typedef enum copy_field_kind {
+    COPY_FIELD_PASSWORD = 0,
+    COPY_FIELD_USERNAME,
+    COPY_FIELD_URL,
+    COPY_FIELD_CUSTOM
+} copy_field_kind;
 
 static bool status_committed(const pv_status status)
 {
@@ -71,47 +92,64 @@ static pv_status read_exact(const int fd, void *const output, const size_t lengt
     return PV_OK;
 }
 
-static bool socket_write_all(const int fd, const void *const input, const size_t length)
+static int waitpid_nointr(const pid_t pid, int *const status, const int options)
+{
+    int result;
+
+    do {
+        result = waitpid(pid, status, options);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+static bool fd_write_all_no_sigpipe(const int fd, const void *const input, const size_t length)
 {
     const uint8_t *cursor = input;
     size_t remaining = length;
+    sigset_t blocked;
+    sigset_t previous;
+    sigset_t pending;
+    bool pipe_was_pending;
+    int saved_errno = 0;
+
+    if (sigemptyset(&blocked) != 0 || sigaddset(&blocked, SIGPIPE) != 0 ||
+        sigprocmask(SIG_BLOCK, &blocked, &previous) != 0) {
+        return false;
+    }
+    if (sigpending(&pending) != 0) {
+        saved_errno = errno;
+        (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+        errno = saved_errno;
+        return false;
+    }
+    pipe_was_pending = sigismember(&pending, SIGPIPE) == 1;
 
     while (remaining > 0U) {
-        const ssize_t written = send(fd, cursor, remaining, MSG_NOSIGNAL);
+        const ssize_t written = write(fd, cursor, remaining);
 
         if (written < 0 && errno == EINTR) {
             continue;
         }
         if (written <= 0) {
-            return false;
+            saved_errno = written < 0 ? errno : EIO;
+            break;
         }
         cursor += (size_t)written;
         remaining -= (size_t)written;
     }
-    return true;
-}
+    if (saved_errno == EPIPE && !pipe_was_pending) {
+        const struct timespec no_wait = { .tv_sec = 0, .tv_nsec = 0 };
+        int waited;
 
-static bool socket_write_title(const int fd, const pv_slice *const title)
-{
-    static const char replacement = '?';
-    size_t position = 0U;
-    size_t safe_start = 0U;
-
-    while (position < title->len) {
-        const uint8_t byte = title->data[position];
-
-        if (byte < 0x20U || byte == 0x7fU) {
-            if (!socket_write_all(fd, title->data + safe_start, position - safe_start) ||
-                !socket_write_all(fd, &replacement, 1U)) {
-                return false;
-            }
-            ++position;
-            safe_start = position;
-        } else {
-            ++position;
-        }
+        do {
+            waited = sigtimedwait(&blocked, NULL, &no_wait);
+        } while (waited < 0 && errno == EINTR);
     }
-    return socket_write_all(fd, title->data + safe_start, position - safe_start);
+    if (sigprocmask(SIG_SETMASK, &previous, NULL) != 0 && saved_errno == 0) {
+        saved_errno = errno;
+    }
+    if (saved_errno != 0) errno = saved_errno;
+    return saved_errno == 0;
 }
 
 static void print_usage(FILE *const stream)
@@ -122,11 +160,11 @@ static void print_usage(FILE *const stream)
         "Commands:\n"
         "  init --recovery-out PATH   Create a new vault\n"
         "  add                         Add a credential\n"
-        "  edit QUERY                  Edit a credential\n"
-        "  remove QUERY                Delete a credential\n"
-        "  list [QUERY]                List credentials\n"
-        "  show QUERY                  Show non-secret fields\n"
-        "  copy QUERY [--field NAME]   Copy a field for the configured TTL\n"
+        "  edit                        Select and edit a credential\n"
+        "  remove                      Select and delete a credential\n"
+        "  list [--allow-redirect]     List credentials\n"
+        "  show [--allow-redirect]     Select and show redacted record metadata\n"
+        "  copy [--field FIELD]        Select and copy a field\n"
         "  pick [--copy] [--rofi]      Keyboard-driven picker\n"
         "  generate [--length N]       Generate and copy a password\n"
         "  passwd [--recovery FILE]    Change the master password\n"
@@ -158,17 +196,21 @@ static bool print_command_usage(
     } else if (strcmp(command, "add") == 0 && topic == NULL) {
         usage = "Usage: pvault [--vault PATH] add\n";
     } else if (strcmp(command, "edit") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] edit QUERY\n";
+        usage = "Usage: pvault [--vault PATH] edit\n";
     } else if (strcmp(command, "remove") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] remove QUERY\n";
+        usage = "Usage: pvault [--vault PATH] remove\n";
     } else if (strcmp(command, "list") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] list [QUERY]\n";
+        usage = "Usage: pvault [--vault PATH] list [--allow-redirect]\n";
     } else if (strcmp(command, "show") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] show QUERY\n";
+        usage = "Usage: pvault [--vault PATH] show [--allow-redirect]\n";
     } else if (strcmp(command, "copy") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] copy QUERY [--field NAME] [--ttl SECONDS]\n";
+        usage =
+            "Usage: pvault [--vault PATH] copy "
+            "[--field password|username|url|custom] [--ttl SECONDS]\n";
     } else if (strcmp(command, "pick") == 0 && topic == NULL) {
-        usage = "Usage: pvault [--vault PATH] pick [--copy] [--rofi]\n";
+        usage =
+            "Usage: pvault [--vault PATH] pick "
+            "[--copy] [--rofi] [--allow-redirect]\n";
     } else if (strcmp(command, "generate") == 0 && topic == NULL) {
         usage = "Usage: pvault generate [--length N]\n";
     } else if (strcmp(command, "passwd") == 0 && topic == NULL) {
@@ -189,14 +231,16 @@ static bool print_command_usage(
     } else if (strcmp(command, "rescue") == 0 && topic == NULL) {
         usage =
             "Usage: pvault rescue inspect SNAPSHOT\n"
-            "       pvault rescue verify SNAPSHOT [--recovery FILE]\n"
+            "       pvault rescue verify SNAPSHOT [--recovery FILE] [--allow-redirect]\n"
             "       pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]\n";
     } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
         strcmp(topic, "inspect") == 0) {
         usage = "Usage: pvault rescue inspect SNAPSHOT\n";
     } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
         strcmp(topic, "verify") == 0) {
-        usage = "Usage: pvault rescue verify SNAPSHOT [--recovery FILE]\n";
+        usage =
+            "Usage: pvault rescue verify SNAPSHOT "
+            "[--recovery FILE] [--allow-redirect]\n";
     } else if (strcmp(command, "rescue") == 0 && topic != NULL &&
         strcmp(topic, "recover") == 0) {
         usage = "Usage: pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]\n";
@@ -234,20 +278,17 @@ static pv_status open_password_vault(
     return status;
 }
 
-static bool record_matches_query(const pv_record *const record, const char *const query)
+static pv_status require_private_output(const bool allow_redirect)
 {
-    size_t i;
-
-    if (query == NULL || query[0] == '\0') return true;
-    if (pv_slice_contains_cstr(&record->title, query, true) ||
-        pv_slice_contains_cstr(&record->username, query, true)) return true;
-    for (i = 0U; i < record->url_count; ++i) {
-        if (pv_slice_contains_cstr(&record->urls[i], query, true)) return true;
+    if (isatty(STDOUT_FILENO) || allow_redirect) {
+        return PV_OK;
     }
-    for (i = 0U; i < record->tag_count; ++i) {
-        if (pv_slice_contains_cstr(&record->tags[i], query, true)) return true;
-    }
-    return false;
+    (void)fprintf(
+        stderr,
+        "pvault: refusing to emit decrypted record metadata to non-terminal stdout; "
+        "repeat with --allow-redirect only for an intentional private destination\n"
+    );
+    return PV_ERR_USAGE;
 }
 
 static void print_slice(const pv_slice *const slice)
@@ -270,23 +311,64 @@ static void print_record_line(const pv_record *const record)
     (void)printf("\n");
 }
 
-static pv_record *find_unique(pv_vault *const vault, const char *const query, pv_status *const status)
+static pv_status select_record_private(pv_vault *const vault, pv_record **const record)
 {
-    size_t matches = 0U;
-    pv_record *record;
+    const pv_status status = pv_ui_pick_internal(vault, record);
 
-    record = pv_model_find(vault, query, &matches);
-    if (record == NULL || matches == 0U) {
-        *status = PV_ERR_NOT_FOUND;
-        return NULL;
+    if (status == PV_ERR_NOT_FOUND) {
+        (void)fprintf(stderr, "pvault: no record selected\n");
     }
-    if (matches != 1U) {
-        (void)fprintf(stderr, "pvault: query matched %zu records; use the full record ID\n", matches);
-        *status = PV_ERR_USAGE;
-        return NULL;
+    return status;
+}
+
+static pv_status reject_positional_selector(void)
+{
+    (void)fprintf(
+        stderr,
+        "pvault: positional record selectors are disabled because process arguments are public; "
+        "use the interactive picker\n"
+    );
+    return PV_ERR_USAGE;
+}
+
+static pv_status tty_write_all(const int fd, const uint8_t *data, const size_t length)
+{
+    size_t written = 0U;
+
+    while (written < length) {
+        const ssize_t result = write(fd, data + written, length - written);
+
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) return PV_ERR_IO;
+        written += (size_t)result;
     }
-    *status = PV_OK;
-    return record;
+    return PV_OK;
+}
+
+static pv_status tty_print_selected_title(const pv_record *const record)
+{
+    uint8_t sanitized[PV_MAX_TITLE];
+    size_t sanitized_len = 0U;
+    int fd;
+    pv_status status = PV_OK;
+
+    if (!pv_text_sanitize(
+            &record->title,
+            sanitized,
+            sizeof(sanitized),
+            &sanitized_len
+        )) {
+        return PV_ERR_STATE;
+    }
+    fd = open("/dev/tty", O_WRONLY | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0 || dprintf(fd, "Selected for deletion: ") < 0) {
+        status = PV_ERR_IO;
+    }
+    if (status == PV_OK) status = tty_write_all(fd, sanitized, sanitized_len);
+    if (status == PV_OK && dprintf(fd, "\n") < 0) status = PV_ERR_IO;
+    if (fd >= 0) (void)close(fd);
+    sodium_memzero(sanitized, sizeof(sanitized));
+    return status;
 }
 
 static pv_status generate_password(const unsigned length, pv_buffer *const password)
@@ -593,9 +675,7 @@ static pv_status command_add(pv_cli_context *const context)
         status = pv_store_save(&vault, &header, context->config.backup_retention);
     }
     if (status_committed(status) && created != NULL) {
-        char id[PV_RECORD_ID_BYTES * 2U + 1U];
-        pv_hex_encode(created->id, PV_RECORD_ID_BYTES, id, sizeof(id));
-        (void)printf("Added %.8s\n", id);
+        (void)printf("Record added\n");
     }
     if (vault.arena.base != NULL) {
         pv_model_destroy(&vault);
@@ -626,7 +706,7 @@ static pv_status replace_slice(
     return status;
 }
 
-static pv_status command_edit(pv_cli_context *const context, const char *const query)
+static pv_status command_edit(pv_cli_context *const context)
 {
     pv_vault vault = { 0 };
     pv_file_header header = { 0 };
@@ -639,7 +719,7 @@ static pv_status command_edit(pv_cli_context *const context, const char *const q
     if (status != PV_OK) {
         return status;
     }
-    record = find_unique(&vault, query, &status);
+    status = select_record_private(&vault, &record);
     if (status == PV_OK && record->revision == UINT64_MAX) {
         status = PV_ERR_LIMIT;
     }
@@ -723,10 +803,7 @@ static pv_status command_edit(pv_cli_context *const context, const char *const q
         status = pv_store_save(&vault, &header, context->config.backup_retention);
     }
     if (status_committed(status) && record != NULL) {
-        char id[PV_RECORD_ID_BYTES * 2U + 1U];
-
-        pv_hex_encode(record->id, PV_RECORD_ID_BYTES, id, sizeof(id));
-        (void)printf("Updated %.8s\n", id);
+        (void)printf("Record updated\n");
     }
     pv_buffer_secure_free(&field);
     pv_buffer_secure_free(&value);
@@ -735,7 +812,7 @@ static pv_status command_edit(pv_cli_context *const context, const char *const q
     return status;
 }
 
-static pv_status command_remove(pv_cli_context *const context, const char *const query)
+static pv_status command_remove(pv_cli_context *const context)
 {
     pv_vault vault = { 0 };
     pv_file_header header = { 0 };
@@ -746,15 +823,15 @@ static pv_status command_remove(pv_cli_context *const context, const char *const
 
     status = open_password_vault(context, &vault, &header);
     if (status == PV_OK) {
-        record = find_unique(&vault, query, &status);
+        status = select_record_private(&vault, &record);
     } else {
         record = NULL;
     }
     if (status == PV_OK) {
-        (void)printf("Delete '");
-        print_slice(&record->title);
-        (void)printf("'?\n");
-        status = pv_tty_confirm("Confirm [y/N]: ", &confirmed);
+        status = tty_print_selected_title(record);
+    }
+    if (status == PV_OK) {
+        status = pv_tty_confirm("Delete the selected record [y/N]: ", &confirmed);
     }
     if (status == PV_OK && !confirmed) {
         cancelled = true;
@@ -776,7 +853,7 @@ static pv_status command_remove(pv_cli_context *const context, const char *const
     return status;
 }
 
-static pv_status command_list(pv_cli_context *const context, const char *const query)
+static pv_status command_list(pv_cli_context *const context, const bool allow_redirect)
 {
     pv_vault vault = { 0 };
     pv_file_header header = { 0 };
@@ -784,13 +861,16 @@ static pv_status command_list(pv_cli_context *const context, const char *const q
     size_t shown = 0U;
     pv_status status;
 
-    status = open_password_vault(context, &vault, &header);
+    status = require_private_output(allow_redirect);
+    if (status == PV_OK) {
+        status = open_password_vault(context, &vault, &header);
+    }
     if (status != PV_OK) {
         return status;
     }
     for (i = 0U; i < vault.record_count; ++i) {
         pv_record *const record = &vault.records[i];
-        if ((record->flags & PV_RECORD_DELETED) != 0U || !record_matches_query(record, query)) {
+        if ((record->flags & PV_RECORD_DELETED) != 0U) {
             continue;
         }
         print_record_line(record);
@@ -841,16 +921,19 @@ static void show_record(const pv_record *const record)
     }
 }
 
-static pv_status command_show(pv_cli_context *const context, const char *const query)
+static pv_status command_show(pv_cli_context *const context, const bool allow_redirect)
 {
     pv_vault vault = { 0 };
     pv_file_header header = { 0 };
     pv_status status;
     pv_record *record;
 
-    status = open_password_vault(context, &vault, &header);
+    status = require_private_output(allow_redirect);
     if (status == PV_OK) {
-        record = find_unique(&vault, query, &status);
+        status = open_password_vault(context, &vault, &header);
+    }
+    if (status == PV_OK) {
+        status = select_record_private(&vault, &record);
     } else {
         record = NULL;
     }
@@ -864,32 +947,77 @@ static pv_status command_show(pv_cli_context *const context, const char *const q
     return status;
 }
 
-static pv_status record_field_view(const pv_record *const record, const char *const field, pv_view *const view)
+static pv_status record_field_view(
+    const pv_record *const record,
+    const copy_field_kind field,
+    pv_view *const view
+)
 {
-    size_t i;
-
-    if (strcmp(field, "password") == 0) {
+    if (field == COPY_FIELD_PASSWORD) {
         *view = (pv_view){ record->password.data, record->password.len };
-    } else if (strcmp(field, "username") == 0) {
+    } else if (field == COPY_FIELD_USERNAME) {
         *view = (pv_view){ record->username.data, record->username.len };
-    } else if (strcmp(field, "url") == 0 && record->url_count > 0U) {
+    } else if (field == COPY_FIELD_URL && record->url_count > 0U) {
         *view = (pv_view){ record->urls[0].data, record->urls[0].len };
     } else {
-        for (i = 0U; i < record->field_count; ++i) {
-            if (pv_slice_equal_cstr(&record->fields[i].name, field, false)) {
-                *view = (pv_view){ record->fields[i].value.data, record->fields[i].value.len };
-                return view->len == 0U ? PV_ERR_NOT_FOUND : PV_OK;
-            }
-        }
         return PV_ERR_NOT_FOUND;
     }
     return view->len == 0U ? PV_ERR_NOT_FOUND : PV_OK;
 }
 
+static pv_status select_custom_field_view(const pv_record *const record, pv_view *const view)
+{
+    uint8_t sanitized[PV_MAX_FIELD_NAME];
+    size_t index;
+    unsigned selection = 0U;
+    int fd;
+    pv_status status = PV_OK;
+
+    if (record->field_count == 0U || record->field_count > (size_t)UINT_MAX) {
+        return PV_ERR_NOT_FOUND;
+    }
+    fd = open("/dev/tty", O_WRONLY | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0 || dprintf(fd, "Custom fields:\n") < 0) status = PV_ERR_IO;
+    for (index = 0U; status == PV_OK && index < record->field_count; ++index) {
+        size_t sanitized_len = 0U;
+
+        if (dprintf(fd, "  %zu. ", index + 1U) < 0 ||
+            !pv_text_sanitize(
+                &record->fields[index].name,
+                sanitized,
+                sizeof(sanitized),
+                &sanitized_len
+            )) {
+            status = PV_ERR_IO;
+            break;
+        }
+        status = tty_write_all(fd, sanitized, sanitized_len);
+        sodium_memzero(sanitized, sizeof(sanitized));
+        if (status == PV_OK && dprintf(fd, "\n") < 0) status = PV_ERR_IO;
+    }
+    sodium_memzero(sanitized, sizeof(sanitized));
+    if (fd >= 0) (void)close(fd);
+    if (status == PV_OK) {
+        status = pv_tty_read_unsigned(
+            "Custom field number: ",
+            (unsigned)record->field_count,
+            0U,
+            &selection
+        );
+    }
+    if (status == PV_OK && selection == 0U) status = PV_ERR_USAGE;
+    if (status == PV_OK) {
+        const pv_slice *const value = &record->fields[selection - 1U].value;
+
+        *view = (pv_view){ value->data, value->len };
+        if (view->len == 0U) status = PV_ERR_NOT_FOUND;
+    }
+    return status;
+}
+
 static pv_status command_copy(
     pv_cli_context *const context,
-    const char *const query,
-    const char *const field,
+    const copy_field_kind field,
     const unsigned ttl
 )
 {
@@ -906,12 +1034,14 @@ static pv_status command_copy(
     }
     status = open_password_vault(context, &vault, &header);
     if (status == PV_OK) {
-        record = find_unique(&vault, query, &status);
+        status = select_record_private(&vault, &record);
     } else {
         record = NULL;
     }
     if (status == PV_OK) {
-        status = record_field_view(record, field, &view);
+        status = field == COPY_FIELD_CUSTOM
+            ? select_custom_field_view(record, &view)
+            : record_field_view(record, field, &view);
     }
     if (status == PV_OK) {
         status = pv_clipboard_send(&job, view.data, view.len);
@@ -931,6 +1061,93 @@ static pv_status command_copy(
     return status;
 }
 
+static char *rofi_environment_entry(const char *const name)
+{
+    const size_t name_len = strlen(name);
+    size_t index;
+
+    for (index = 0U; environ != NULL && environ[index] != NULL; ++index) {
+        if (strncmp(environ[index], name, name_len) == 0 && environ[index][name_len] == '=') {
+            return environ[index];
+        }
+    }
+    return NULL;
+}
+
+static void rofi_close_inherited_fds(void)
+{
+    struct rlimit limit;
+    long maximum;
+    int fd;
+
+    if (close_range(3U, UINT_MAX, 0) == 0) return;
+    maximum = sysconf(_SC_OPEN_MAX);
+    if ((maximum < 0L || maximum > (long)INT_MAX) &&
+        getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur <= (rlim_t)INT_MAX) {
+        maximum = (long)limit.rlim_cur;
+    }
+    if (maximum < 0L || maximum > (long)INT_MAX) maximum = 65536L;
+    for (fd = 3; fd < (int)maximum; ++fd) {
+        (void)close(fd);
+    }
+}
+
+static bool rofi_reset_signal_state(void)
+{
+    static const int signals[] = {
+        SIGINT,
+        SIGTERM,
+        SIGHUP,
+        SIGQUIT,
+        SIGTSTP,
+        SIGPIPE,
+        SIGCHLD
+    };
+    struct sigaction default_action;
+    sigset_t guarded;
+    sigset_t empty;
+    size_t index;
+
+    memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    if (sigemptyset(&default_action.sa_mask) != 0 || sigemptyset(&guarded) != 0 ||
+        sigemptyset(&empty) != 0) {
+        return false;
+    }
+    for (index = 0U; index < sizeof(signals) / sizeof(signals[0]); ++index) {
+        if (sigaddset(&guarded, signals[index]) != 0) return false;
+    }
+    if (sigprocmask(SIG_BLOCK, &guarded, NULL) != 0) return false;
+    for (index = 0U; index < sizeof(signals) / sizeof(signals[0]); ++index) {
+        if (sigaction(signals[index], &default_action, NULL) != 0) return false;
+    }
+    return sigprocmask(SIG_SETMASK, &empty, NULL) == 0;
+}
+
+static bool rofi_wait_deadline(const pid_t pid, const unsigned attempts)
+{
+    const struct timespec interval = { .tv_sec = 0, .tv_nsec = 10000000L };
+    unsigned attempt;
+
+    for (attempt = 0U; attempt < attempts; ++attempt) {
+        const int result = waitpid_nointr(pid, NULL, WNOHANG);
+
+        if (result == pid || (result < 0 && errno == ECHILD)) return true;
+        if (result < 0) return false;
+        (void)nanosleep(&interval, NULL);
+    }
+    return false;
+}
+
+static void rofi_terminate_and_reap(const pid_t pid)
+{
+    if (pid <= 0 || rofi_wait_deadline(pid, 1U)) return;
+    (void)kill(pid, SIGTERM);
+    if (rofi_wait_deadline(pid, 50U)) return;
+    (void)kill(pid, SIGKILL);
+    (void)waitpid_nointr(pid, NULL, 0);
+}
+
 static pv_status rofi_prepare(rofi_job *const job)
 {
     int input_socket[2] = { -1, -1 };
@@ -947,6 +1164,37 @@ static pv_status rofi_prepare(rofi_job *const job)
         goto fail;
     }
     if (pid == 0) {
+        static const char *const allowed_names[] = {
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "HOME",
+            "XAUTHORITY",
+            "XDG_CONFIG_HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE"
+        };
+        char safe_path[] = "PATH=/usr/bin:/bin";
+        char *environment[sizeof(allowed_names) / sizeof(allowed_names[0]) + 2U];
+        char argument_0[] = "rofi";
+        char argument_1[] = "-dmenu";
+        char argument_2[] = "-i";
+        char argument_3[] = "-p";
+        char argument_4[] = "PVault";
+        char *arguments[] = {
+            argument_0,
+            argument_1,
+            argument_2,
+            argument_3,
+            argument_4,
+            NULL
+        };
+        size_t allowed_index;
+        size_t environment_count = 1U;
+
+        environment[0] = safe_path;
+
         if (dup2(input_socket[0], STDIN_FILENO) < 0 || dup2(output_pipe[1], STDOUT_FILENO) < 0) {
             _exit(126);
         }
@@ -954,7 +1202,17 @@ static pv_status rofi_prepare(rofi_job *const job)
         (void)close(input_socket[1]);
         (void)close(output_pipe[0]);
         (void)close(output_pipe[1]);
-        execl("/usr/bin/rofi", "rofi", "-dmenu", "-i", "-p", "PVault", (char *)NULL);
+        if (!rofi_reset_signal_state()) _exit(126);
+        rofi_close_inherited_fds();
+        for (allowed_index = 0U;
+             allowed_index < sizeof(allowed_names) / sizeof(allowed_names[0]);
+             ++allowed_index) {
+            char *const entry = rofi_environment_entry(allowed_names[allowed_index]);
+
+            if (entry != NULL) environment[environment_count++] = entry;
+        }
+        environment[environment_count] = NULL;
+        execve(PVAULT_ROFI_EXECUTABLE, arguments, environment);
         _exit(127);
     }
     (void)close(input_socket[0]);
@@ -977,35 +1235,86 @@ static void rofi_cancel(rofi_job *const job)
     if (job->input_fd >= 0) (void)close(job->input_fd);
     if (job->output_fd >= 0) (void)close(job->output_fd);
     if (job->pid > 0) {
-        (void)kill(job->pid, SIGTERM);
-        (void)waitpid(job->pid, NULL, 0);
+        rofi_terminate_and_reap(job->pid);
     }
     *job = (rofi_job){ .input_fd = -1, .output_fd = -1, .pid = -1 };
 }
 
+static bool rofi_token_unique(
+    const rofi_entry *const entries,
+    const size_t entry_count,
+    const uint8_t token[8]
+)
+{
+    size_t index;
+
+    for (index = 0U; index < entry_count; ++index) {
+        if (sodium_memcmp(entries[index].token, token, sizeof(entries[index].token)) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static pv_status rofi_select(rofi_job *const job, pv_vault *const vault, pv_record **const selected)
 {
+    rofi_entry *entries;
+    size_t entry_count = 0U;
     size_t i;
     char response[PV_MAX_TITLE + 64U];
     size_t used = 0U;
     pv_status status = PV_ERR_NOT_FOUND;
 
+    entries = calloc(vault->record_count, sizeof(*entries));
+    if (entries == NULL && vault->record_count != 0U) {
+        rofi_cancel(job);
+        return PV_ERR_NOMEM;
+    }
     for (i = 0U; i < vault->record_count; ++i) {
-        char id[PV_RECORD_ID_BYTES * 2U + 1U];
-        char suffix[PV_RECORD_ID_BYTES * 2U + 3U];
+        uint8_t safe_title[PV_MAX_TITLE];
+        size_t safe_title_len = 0U;
+        char token_hex[sizeof(entries[entry_count].token) * 2U + 1U];
+        char suffix[sizeof(token_hex) + 2U];
         int suffix_length;
+        bool sanitized_ok;
+        bool title_sent;
+        bool suffix_sent;
+        bool sent;
 
         if ((vault->records[i].flags & PV_RECORD_DELETED) != 0U) {
             continue;
         }
-        pv_hex_encode(vault->records[i].id, PV_RECORD_ID_BYTES, id, sizeof(id));
-        suffix_length = snprintf(suffix, sizeof(suffix), "\t%s\n", id);
-        if (suffix_length < 0 || (size_t)suffix_length >= sizeof(suffix) ||
-            !socket_write_title(job->input_fd, &vault->records[i].title) ||
-            !socket_write_all(job->input_fd, suffix, (size_t)suffix_length)) {
+        do {
+            randombytes_buf(entries[entry_count].token, sizeof(entries[entry_count].token));
+        } while (!rofi_token_unique(entries, entry_count, entries[entry_count].token));
+        entries[entry_count].record = &vault->records[i];
+        pv_hex_encode(
+            entries[entry_count].token,
+            sizeof(entries[entry_count].token),
+            token_hex,
+            sizeof(token_hex)
+        );
+        suffix_length = snprintf(suffix, sizeof(suffix), "\t%s\n", token_hex);
+        sanitized_ok = pv_text_sanitize(
+            &vault->records[i].title,
+            safe_title,
+            sizeof(safe_title),
+            &safe_title_len
+        );
+        title_sent = sanitized_ok &&
+            fd_write_all_no_sigpipe(job->input_fd, safe_title, safe_title_len);
+        suffix_sent = suffix_length >= 0 && (size_t)suffix_length < sizeof(suffix) &&
+            title_sent && fd_write_all_no_sigpipe(job->input_fd, suffix, (size_t)suffix_length);
+        sent = sanitized_ok && title_sent && suffix_sent;
+        sodium_memzero(safe_title, sizeof(safe_title));
+        sodium_memzero(token_hex, sizeof(token_hex));
+        sodium_memzero(suffix, sizeof(suffix));
+        if (!sent) {
             rofi_cancel(job);
-            return PV_ERR_EXTERNAL;
+            status = PV_ERR_EXTERNAL;
+            goto cleanup;
         }
+        ++entry_count;
     }
     (void)close(job->input_fd);
     job->input_fd = -1;
@@ -1022,30 +1331,48 @@ static pv_status rofi_select(rofi_job *const job, pv_vault *const vault, pv_reco
     response[used] = '\0';
     (void)close(job->output_fd);
     job->output_fd = -1;
-    (void)waitpid(job->pid, NULL, 0);
-    job->pid = -1;
-    if (used > 0U) {
-        char *tab = strrchr(response, '\t');
-        if (tab != NULL) {
-            uint8_t id[PV_RECORD_ID_BYTES];
-            char *newline;
-            ++tab;
-            newline = strpbrk(tab, "\r\n");
-            if (newline != NULL) {
-                *newline = '\0';
-            }
-            if (pv_hex_decode(tab, id, sizeof(id))) {
-                *selected = pv_model_find_id(vault, id);
-                status = *selected == NULL ? PV_ERR_NOT_FOUND : PV_OK;
-            }
-            sodium_memzero(id, sizeof(id));
-        }
+    if (!rofi_wait_deadline(job->pid, 50U)) {
+        rofi_terminate_and_reap(job->pid);
     }
+    job->pid = -1;
+    if (used > 1U && response[used - 1U] == '\n') {
+        char *const tab = strchr(response, '\t');
+        size_t token_length;
+        uint8_t token[sizeof(entries[0].token)];
+
+        response[--used] = '\0';
+        if (used > 0U && response[used - 1U] == '\r') {
+            response[--used] = '\0';
+        }
+        if (tab != NULL && strchr(tab + 1, '\t') == NULL &&
+            strpbrk(response, "\r\n") == NULL) {
+            token_length = used - (size_t)(tab + 1 - response);
+            if (token_length == sizeof(token) * 2U &&
+                pv_hex_decode(tab + 1, token, sizeof(token))) {
+                for (i = 0U; i < entry_count; ++i) {
+                    if (sodium_memcmp(entries[i].token, token, sizeof(token)) == 0) {
+                        *selected = entries[i].record;
+                        status = PV_OK;
+                        break;
+                    }
+                }
+            }
+        }
+        sodium_memzero(token, sizeof(token));
+    }
+cleanup:
+    if (entries != NULL) sodium_memzero(entries, vault->record_count * sizeof(*entries));
+    free(entries);
     sodium_memzero(response, sizeof(response));
     return status;
 }
 
-static pv_status command_pick(pv_cli_context *const context, const bool copy, const bool rofi)
+static pv_status command_pick(
+    pv_cli_context *const context,
+    const bool copy,
+    const bool rofi,
+    const bool allow_redirect
+)
 {
     pv_clipboard_job clip_job = {
         .write_fd = -1,
@@ -1061,6 +1388,8 @@ static pv_status command_pick(pv_cli_context *const context, const bool copy, co
     pv_record *selected = NULL;
     pv_status status;
 
+    status = copy ? PV_OK : require_private_output(allow_redirect);
+    if (status != PV_OK) return status;
     if (copy) {
         status = pv_clipboard_prepare(&clip_job, context->config.clipboard_ttl);
         if (status != PV_OK) return status;
@@ -1415,14 +1744,18 @@ static pv_status open_authenticated_snapshot(
 
 static pv_status command_rescue_verify(
     const char *const snapshot,
-    const char *const recovery_file
+    const char *const recovery_file,
+    const bool allow_redirect
 )
 {
     pv_vault vault = { 0 };
     pv_file_header header = { 0 };
     pv_status status;
 
-    status = open_authenticated_snapshot(snapshot, recovery_file, &vault, &header);
+    status = require_private_output(allow_redirect);
+    if (status == PV_OK) {
+        status = open_authenticated_snapshot(snapshot, recovery_file, &vault, &header);
+    }
     if (status == PV_OK) {
         print_snapshot_identity(&header, &vault);
     }
@@ -1478,6 +1811,7 @@ static pv_status parse_rescue_command(const int argc, char **const argv)
 {
     const char *recovery_file = NULL;
     const char *output = NULL;
+    bool allow_redirect = false;
     int i;
 
     if (argc == 2 && strcmp(argv[0], "inspect") == 0) {
@@ -1487,11 +1821,13 @@ static pv_status parse_rescue_command(const int argc, char **const argv)
         for (i = 2; i < argc; ++i) {
             if (strcmp(argv[i], "--recovery") == 0 && recovery_file == NULL && i + 1 < argc) {
                 recovery_file = argv[++i];
+            } else if (strcmp(argv[i], "--allow-redirect") == 0 && !allow_redirect) {
+                allow_redirect = true;
             } else {
                 return PV_ERR_USAGE;
             }
         }
-        return command_rescue_verify(argv[1], recovery_file);
+        return command_rescue_verify(argv[1], recovery_file, allow_redirect);
     }
     if (argc >= 2 && strcmp(argv[0], "recover") == 0) {
         for (i = 2; i < argc; ++i) {
@@ -1634,37 +1970,67 @@ pv_status pv_cli_run(pv_cli_context *const context, int argc, char **argv)
         return command_config_check();
     }
     if (strcmp(command, "add") == 0 && argc == 0) return command_add(context);
-    if (strcmp(command, "edit") == 0 && argc == 1) return command_edit(context, argv[0]);
-    if (strcmp(command, "remove") == 0 && argc == 1) return command_remove(context, argv[0]);
-    if (strcmp(command, "list") == 0 && argc <= 1) return command_list(context, argc == 1 ? argv[0] : NULL);
-    if (strcmp(command, "show") == 0 && argc == 1) return command_show(context, argv[0]);
+    if (strcmp(command, "edit") == 0) {
+        return argc == 0 ? command_edit(context) : reject_positional_selector();
+    }
+    if (strcmp(command, "remove") == 0) {
+        return argc == 0 ? command_remove(context) : reject_positional_selector();
+    }
+    if (strcmp(command, "list") == 0) {
+        if (argc == 0) return command_list(context, false);
+        if (argc == 1 && strcmp(argv[0], "--allow-redirect") == 0) {
+            return command_list(context, true);
+        }
+        return reject_positional_selector();
+    }
+    if (strcmp(command, "show") == 0) {
+        if (argc == 0) return command_show(context, false);
+        if (argc == 1 && strcmp(argv[0], "--allow-redirect") == 0) {
+            return command_show(context, true);
+        }
+        return reject_positional_selector();
+    }
     if (strcmp(command, "shell") == 0 && argc == 0) return pv_shell_run(context);
     if (strcmp(command, "doctor") == 0 && argc == 0) return command_doctor(context);
-    if (strcmp(command, "copy") == 0 && argc >= 1) {
-        const char *field = "password";
+    if (strcmp(command, "copy") == 0) {
+        copy_field_kind field = COPY_FIELD_PASSWORD;
         unsigned ttl = context->config.clipboard_ttl;
         int i;
-        for (i = 1; i < argc; ++i) {
-            if (strcmp(argv[i], "--field") == 0 && i + 1 < argc) field = argv[++i];
-            else if (strcmp(argv[i], "--ttl") == 0 && i + 1 < argc) {
+        for (i = 0; i < argc; ++i) {
+            if (strcmp(argv[i], "--field") == 0 && i + 1 < argc) {
+                const char *const value = argv[++i];
+
+                if (strcmp(value, "password") == 0) field = COPY_FIELD_PASSWORD;
+                else if (strcmp(value, "username") == 0) field = COPY_FIELD_USERNAME;
+                else if (strcmp(value, "url") == 0) field = COPY_FIELD_URL;
+                else if (strcmp(value, "custom") == 0) field = COPY_FIELD_CUSTOM;
+                else return PV_ERR_USAGE;
+            } else if (strcmp(argv[i], "--ttl") == 0 && i + 1 < argc) {
                 char *end = NULL;
                 const unsigned long value = strtoul(argv[++i], &end, 10);
                 if (end == argv[i] || *end != '\0' || value == 0U || value > 300U) return PV_ERR_USAGE;
                 ttl = (unsigned)value;
-            } else return PV_ERR_USAGE;
+            } else if (argv[i][0] != '-') {
+                return reject_positional_selector();
+            } else {
+                return PV_ERR_USAGE;
+            }
         }
-        return command_copy(context, argv[0], field, ttl);
+        return command_copy(context, field, ttl);
     }
     if (strcmp(command, "pick") == 0) {
         bool copy = false;
         bool rofi = context->config.picker_rofi;
+        bool allow_redirect = false;
         int i;
         for (i = 0; i < argc; ++i) {
             if (strcmp(argv[i], "--copy") == 0) copy = true;
             else if (strcmp(argv[i], "--rofi") == 0) rofi = true;
+            else if (strcmp(argv[i], "--allow-redirect") == 0) allow_redirect = true;
             else return PV_ERR_USAGE;
         }
-        return command_pick(context, copy, rofi);
+        if (copy && allow_redirect) return PV_ERR_USAGE;
+        return command_pick(context, copy, rofi, allow_redirect);
     }
     if (strcmp(command, "generate") == 0) {
         unsigned length = 24U;

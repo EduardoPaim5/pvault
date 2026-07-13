@@ -159,6 +159,7 @@ int main(void)
     }
 
     pv_test_run("process.hardening_is_active", process_hardening_is_active);
+    pv_test_util_suite();
     pv_test_crypto_suite();
     pv_test_cbor_suite();
     pv_test_compat_suite();

@@ -22,10 +22,11 @@ limites e serialização determinística passam em GCC, Clang, ASan e UBSan.
 Critério agora coberto por regressão PTY: um fluxo descartável executa `init`,
 `add`, troca e rejeição da senha anterior, rotação e rejeição da recovery
 anterior, `passwd --recovery`, backup, mutação e restore autenticado. O cenário
-confirma o rollback esperado, a persistência dos registros, ausência de
-segredos nas superfícies observáveis e permissões 0600/0700.
+confirma o rollback esperado, a persistência dos registros, ausência das chaves
+e senhas sintéticas nas superfícies observadas e permissões 0600/0700. Isso não
+equivale a auditoria nem torna o software adequado para credenciais reais.
 
-## Fase 3 — Estabilização para uso real (em andamento)
+## Fase 3 — Estabilização para uso real (em andamento; uso real ainda vetado)
 
 Infraestrutura entregue neste marco:
 
@@ -69,7 +70,22 @@ Infraestrutura entregue neste marco:
 - ACK do clipboard após payload enfileirado, write-end fechado, owner observado
   vivo e timer suspend-aware armado com `CLOCK_BOOTTIME`, além da normalização
   de sinais herdados e regressões para owner morto antes/na metade da leitura e
-  parent-death.
+  parent-death;
+- contrato de CLI queryless para `edit`, `remove`, `show` e `copy`, com seleção
+  pelo picker interno em vez de título, username, URL, tag ou ID persistente em
+  `argv`;
+- recusa de metadados em stdout não-TTY para `list`, `show`, `pick` sem cópia e
+  `rescue verify`, salvo opt-in deliberado com `--allow-redirect`; `shell` exige
+  stdin e stdout terminais;
+- custom fields selecionados privadamente por índice com `--field custom`, status
+  de `add`/`edit` sem ID e rofi opt-in limitado a título sanitizado, token
+  efêmero e ambiente allowlisted.
+
+Essa mudança de interface é uma quebra intencional de pre-alpha. As antigas
+formas posicionais com `QUERY` falham explicitamente como erro de uso, em vez de
+serem reinterpretadas ou manterem vazamento compatível. `--allow-redirect` não
+é um selo de segurança: apenas registra que o operador escolheu conscientemente
+um destino não-TTY e assume suas permissões, logs e retenção.
 
 Permanecem como gates da fase:
 
@@ -84,15 +100,19 @@ Permanecem como gates da fase:
 - publicação efetiva de release assinada e checksum real no PKGBUILD;
 - congelamento do formato v1.0 com vetores independentes e drill testado de
   rescue, rollback-copy e restore;
-- repetição do restore drill em uma máquina separada.
+- repetição do restore drill em uma máquina separada;
+- auditoria independente do novo limite de metadados da CLI, incluindo
+  redirecionamento explícito, picker externo e regressões contra argv, ambiente,
+  stdout/stderr e logs.
 
 O v1.0 é o primeiro e único formato implementado. Uma migração v1→v1 seria
 apenas regravação e não satisfaria o contrato. A migração cross-version passa a
 ser gate obrigatório da primeira release que escrever um vNext real, com
 fixture N-1, política explícita para recovery e transformação sem perda.
 
-Gate: não recomendar credenciais reais antes de corrigir achados da auditoria e
-executar recuperação periódica de snapshots em uma máquina separada.
+Gate: não recomendar credenciais reais antes de corrigir achados da auditoria,
+auditar independentemente o contrato queryless/TTY e executar recuperação
+periódica de snapshots em uma máquina separada.
 
 ## Fase 4 — Android e sincronização (adiada)
 

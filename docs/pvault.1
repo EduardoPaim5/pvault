@@ -17,7 +17,8 @@ data.
 .PP
 The master password is read from the controlling terminal with echo disabled.
 It is never accepted as a command-line argument. Secret fields are not printed
-by normal commands.
+by normal commands. Record selectors are also kept out of command-line
+arguments; commands that target a record use the internal picker.
 .SH COMMANDS
 .TP
 .B init [--vault PATH] --recovery-out PATH
@@ -32,33 +33,52 @@ This is a guardrail rather than an entropy estimate; prefer a randomly
 generated 5-6 word passphrase.
 .TP
 .B add
-Create a record using the internal terminal form.
+Create a record using the internal terminal form. The success message is
+generic and does not reveal the new persistent record identifier.
 .TP
-.B edit QUERY
-Edit the uniquely matching record. Secret values are not passed to an external
-editor.
+.B edit
+Select a record with the internal picker and edit it. Secret values are not
+passed to an external editor. The success message does not reveal the persistent
+record identifier.
 .TP
-.B remove QUERY
-Mark the uniquely matching record as deleted after confirmation.
+.B remove
+Select a record with the internal picker and mark it as deleted after a private
+terminal confirmation.
 .TP
-.B list [QUERY]
-List non-secret record summaries, optionally filtered by QUERY.
+.B list [--allow-redirect]
+List record summaries. Because titles, usernames, flags, counts, and record
+identifiers are protected metadata, non-terminal stdout is refused unless
+.B --allow-redirect
+is present.
 .TP
-.B show QUERY
-Show non-secret metadata for one record. Passwords and custom fields marked
-secret are omitted.
+.B show [--allow-redirect]
+Select a record with the internal picker and show its metadata. Passwords and
+custom fields marked secret are omitted. Non-terminal stdout is refused unless
+.B --allow-redirect
+is present.
 .TP
-.B copy QUERY [--field FIELD] [--ttl SECONDS]
-Offer the selected field through the clipboard for a limited time. FIELD
-defaults to the password field and SECONDS defaults to the configured clipboard
+.B copy [--field password|username|url|custom] [--ttl SECONDS]
+Select a record with the internal picker and offer the selected field through
+the clipboard for a limited time. FIELD defaults to password. With
+.BR "--field custom" ,
+sanitized custom-field names are listed on
+.I /dev/tty
+and selected by a private ordinal, so duplicate names remain addressable and
+arbitrary names are never accepted through argv. SECONDS defaults to the configured clipboard
 TTL, initially 10.
 .TP
-.B pick [--copy] [--rofi]
+.B pick [--copy] [--rofi] [--allow-redirect]
 Search records with the keyboard-driven picker. The default picker runs inside
 PVault. With
 .BR --rofi ,
-only a display title and the full hexadecimal record identifier are exposed to
-the external picker.
+only a sanitized display title and a random token valid for that invocation are
+exposed to the external picker; the persistent record identifier is not sent.
+Without
+.BR --copy ,
+the selected metadata is refused on non-terminal stdout unless
+.B --allow-redirect
+is present. The redirect option is invalid together with
+.BR --copy .
 .TP
 .B generate [--length N]
 Generate a password using libsodium randomness and offer it through the
@@ -94,10 +114,13 @@ Validate private-file metadata, size, and framing without a credential. All
 reported header values are explicitly unauthenticated. The body is not parsed
 and no file is written.
 .TP
-.B rescue verify SNAPSHOT [--recovery FILE]
+.B rescue verify SNAPSHOT [--recovery FILE] [--allow-redirect]
 Authenticate the complete snapshot with a master password read from the TTY or
 with FILE, then report only authenticated format, vault ID, generation, record
 count, and encrypted snapshot hash. Record contents are not displayed.
+Non-terminal stdout is refused unless
+.B --allow-redirect
+is present.
 .TP
 .B rescue recover SNAPSHOT --output PATH [--recovery FILE]
 Authenticate SNAPSHOT and publish a byte-exact encrypted copy at a new PATH.
@@ -125,7 +148,8 @@ content is not displayed.
 .B shell
 Open an interactive session. The decrypted vault stays only in the current
 process and locks after the configured inactivity timeout (300 seconds by
-default).
+default). Both stdin and stdout must be terminals; shell metadata is never
+permitted on redirected stdout.
 .TP
 .B help
 Display the commands supported by the installed revision.
@@ -134,6 +158,18 @@ Display the commands supported by the installed revision.
 .BI --vault " PATH"
 Use the absolute PATH instead of the configured/default vault. Relative paths
 are rejected.
+.TP
+.B --allow-redirect
+Permit protected metadata on non-terminal stdout for
+.BR list ,
+.BR show ,
+a non-copying
+.BR pick ,
+or
+.BR "rescue verify" .
+This is an explicit acknowledgement, not encryption or destination hardening.
+The caller remains responsible for permissions, logs, retention, and downstream
+consumers.
 .TP
 .BR -h , " --help"
 Display command help.
@@ -224,6 +260,40 @@ supervisor dies abruptly.
 Clipboard managers and applications can retain a password after reading it;
 expiration cannot revoke an already consumed copy. X11 clients in the same
 session can request the selection.
+.SH PICKER AND METADATA OUTPUT
+The internal picker reads and renders through
+.I /dev/tty
+so search terms and persistent record identifiers do not need to enter argv.
+The earlier pre-alpha forms
+.BR "edit QUERY" ,
+.BR "remove QUERY" ,
+.BR "list QUERY" ,
+.BR "show QUERY" ,
+and
+.BR "copy QUERY"
+are deliberately rejected with an invalid-usage status. This is a breaking
+pre-alpha change; the arguments are not silently reinterpreted. Scripts that
+parsed the old Added-ID or Updated-ID status must also be changed because those
+identifiers are no longer emitted.
+.PP
+Rejection cannot retract an argument already supplied to the shell and kernel.
+Do not test a legacy positional form with real metadata; use synthetic text.
+.PP
+Rofi is opt-in. PVault sanitizes each title, associates it with a new ephemeral
+token for the current invocation, and sends those two values to rofi. It never
+sends the persistent record ID. Rofi is executed with an allowlist containing
+only required display, runtime, authentication, home, and locale variables.
+Rofi remains external to the trusted core and can observe every displayed
+title.
+.PP
+Protected metadata is printed only to terminal stdout unless
+.B --allow-redirect
+was supplied for a command that supports it. Successful
+.B add
+and
+.B edit
+messages are generic and contain no record ID. Diagnostic errors do not repeat
+a rejected positional selector.
 .SH CONFIGURATION
 The configuration file is a strict, non-secret file containing one
 .I key=value
@@ -264,7 +334,8 @@ Operation not performed because an object was not found or the destination
 already exists.
 .TP
 .B 2
-Invalid command or option.
+Invalid command or option, including a rejected positional record selector or
+protected metadata directed to non-terminal stdout without explicit opt-in.
 .TP
 .B 3
 Authentication, integrity, malformed-format, or unsupported-version failure.
@@ -288,6 +359,12 @@ estimate. Prefer encrypted swap and avoid unencrypted hibernation.
 Do not use persistent clipboard history for secrets. If an update reports that
 it was committed but durability could not be confirmed, preserve both the old
 and new recovery material and verify the vault before taking another action.
+.PP
+PVault remains pre-alpha, has not received an independent security audit, and
+must not be used for real credentials. Use
+.B --allow-redirect
+only for a deliberately private destination; PVault cannot retract metadata
+after another process or file has consumed it.
 .PP
 .B mlock
 reduces normal swap exposure but does not protect from root, a compromised
