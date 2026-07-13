@@ -37,6 +37,29 @@ before expiration; PVault cannot revoke data already consumed by another
 process. Manual testing on the user's live display must remain a separate,
 explicit operation because claiming `CLIPBOARD` replaces its current contents.
 
+## Manual live-i3 canary
+
+`scripts/test-live-x11-i3.sh` exercises the intended native-X11 i3 session and
+is never run by CI. It requires explicit human consent because it overwrites the
+active clipboard. The script uses a synthetic canary only; it does not read,
+save, or restore the previous clipboard value, and it aborts when it detects a
+clipboard manager.
+
+The build requires X-Resource 1.2 (`libxres` on Arch). Before the one synthetic
+content read, the harness requires that XRes bind the new selection Window to
+the exact captured local `xclip` PID; an unavailable identity fails closed.
+
+Run it only as a deliberate human check after reading its prompt. A successful
+TTL check shows that PVault ended its own selection ownership; it cannot prove
+that another client did not retain the bytes and is not evidence of revocation
+or erasure. This live-session gate remains open until a person executes the
+canary and reviews its result; CI coverage or the script's presence alone does
+not close it.
+
+```sh
+./scripts/test-live-x11-i3.sh --acknowledge-live-clipboard-overwrite
+```
+
 ## Experimental Wayland characterization
 
 The Wayland suite starts a disposable headless Weston compositor and invokes

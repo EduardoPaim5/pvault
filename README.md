@@ -77,6 +77,14 @@ The opt-in system test with a real X11 server and real `xclip` additionally
 requires `xorg-server-xvfb`. It runs on a disposable display and never touches
 the user's current clipboard.
 
+The manual live-i3 canary additionally requires `libxres` so it can bind the
+X11 selection Window to the captured local `xclip` PID before its single
+synthetic read:
+
+```sh
+sudo pacman -S --needed libxres
+```
+
 The testing-only Wayland characterization additionally requires `weston` and
 `wl-clipboard`. These are not runtime dependencies. The harness starts a
 headless disposable compositor and never connects to the user's current
@@ -144,6 +152,18 @@ truth:
 ./scripts/restore-drill.sh
 ./scripts/test-real-x11.sh       # optional; requires Xvfb
 ./scripts/test-real-wayland.sh   # experimental characterization; not installable support
+```
+
+`scripts/test-live-x11-i3.sh` is a separate manual canary for the user's live
+native-X11 i3 session. It is never run by CI and requires explicit human
+consent because it overwrites the current clipboard. It uses only synthetic
+data, does not read, save, or restore the previous clipboard value, and aborts
+when it detects a clipboard manager. Its TTL ends PVault's ownership; it cannot
+prove revocation or erasure. The live-session gate remains open until a person
+has deliberately run and reviewed this canary.
+
+```sh
+./scripts/test-live-x11-i3.sh --acknowledge-live-clipboard-overwrite
 ```
 
 The fuzz script keeps synthetic corpora and private failure artifacts under the

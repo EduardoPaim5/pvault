@@ -115,8 +115,12 @@ Permanecem como gates da fase:
 - auditoria independente do formato, parser, memória e processos;
 - redesenhar a integração Wayland antes de qualquer habilitação em produção; o
   experimento atual e seu teste verde não satisfazem cleanup ou revogação;
-- ensaio manual separado do `xclip` dentro do i3, com confirmação explícita de
-  que o clipboard ativo será substituído;
+- execução humana de `scripts/test-live-x11-i3.sh` na sessão i3/X11 nativa,
+  nunca pelo CI, com consentimento explícito para substituir o clipboard ativo;
+  o ensaio usa apenas canário sintético, não lê, salva nem restaura o valor
+  anterior e aborta ao detectar clipboard manager. O TTL encerra a posse da
+  seleção pelo PVault, mas não prova revogação ou apagamento; este gate só fecha
+  depois que uma pessoa executar e revisar o resultado;
 - CI em arquiteturas e libcs diferentes;
 - campanhas longas de fuzzing, minimização e triagem privada dos artefatos;
 - reprodução cruzada em duas máquinas e toolchains independentes;
