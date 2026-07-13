@@ -94,12 +94,32 @@ pv_status pv_secure_process_hardening(void)
     return PV_OK;
 }
 
+static pv_status normalize_sigchld_state(void)
+{
+    struct sigaction default_action;
+    sigset_t child_signal;
+
+    memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    if (sigemptyset(&default_action.sa_mask) != 0 ||
+        sigaction(SIGCHLD, &default_action, NULL) != 0 ||
+        sigemptyset(&child_signal) != 0 ||
+        sigaddset(&child_signal, SIGCHLD) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &child_signal, NULL) != 0) {
+        return PV_ERR_STATE;
+    }
+    return PV_OK;
+}
+
 pv_status pv_global_init(void)
 {
+    pv_status status;
+
     if (sodium_init() < 0) {
         return PV_ERR_STATE;
     }
-    return pv_secure_process_hardening();
+    status = normalize_sigchld_state();
+    return status == PV_OK ? pv_secure_process_hardening() : status;
 }
 
 void pv_secure_stack_clear(void)
