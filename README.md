@@ -19,8 +19,9 @@ path, and CLI have been exercised and reviewed.
 - Encrypt with XChaCha20-Poly1305 through libsodium.
 - Keep plaintext and keys in locked, explicitly cleared memory where possible.
 - Write vault updates atomically and retain encrypted backups.
-- Never place passwords in command arguments, environment variables, logs, or
-  normal terminal output.
+- Never place passwords or record selectors in command arguments, environment
+  variables, or logs. Decrypted record metadata is terminal-only unless the
+  user explicitly authorizes a private redirection.
 - Keep cryptography, CBOR, and the in-memory model independent of ncurses and
   clipboard code. The current desktop library target still aggregates Linux
   storage, TTY hardening, and XDG configuration; Android will need a small
@@ -152,19 +153,19 @@ The planned 0.1 interface is:
 ```text
 pvault init [--vault PATH] --recovery-out PATH
 pvault add
-pvault edit QUERY
-pvault remove QUERY
-pvault list [QUERY]
-pvault show QUERY
-pvault copy QUERY [--field FIELD] [--ttl SECONDS]
-pvault pick [--copy] [--rofi]
+pvault edit
+pvault remove
+pvault list [--allow-redirect]
+pvault show [--allow-redirect]
+pvault copy [--field password|username|url|custom] [--ttl SECONDS]
+pvault pick [--copy] [--rofi] [--allow-redirect]
 pvault generate [--length N]
 pvault passwd [--recovery FILE]
 pvault recovery rotate --out PATH
 pvault backup --output PATH
 pvault restore PATH
 pvault rescue inspect SNAPSHOT
-pvault rescue verify SNAPSHOT [--recovery FILE]
+pvault rescue verify SNAPSHOT [--recovery FILE] [--allow-redirect]
 pvault rescue recover SNAPSHOT --output PATH [--recovery FILE]
 pvault rollback SNAPSHOT --output PATH [--recovery FILE]
 pvault config check
@@ -176,10 +177,43 @@ Run `pvault help` or consult `man pvault` for the commands supported by the
 checked-out revision. During pre-alpha development, individual commands may be
 landed incrementally.
 
-`show` intentionally omits secret values. `copy` is the normal way to retrieve
-a password. PVault does not accept a password through `argv` and does not offer
-a plaintext export command. `generate` always offers the generated password
-through the clipboard; it never prints it.
+`edit`, `remove`, `show`, and `copy` select a record with the in-process picker;
+they do not accept a title, username, URL, tag, or persistent record ID through
+`argv`. The earlier pre-alpha positional forms such as `show QUERY` and
+`copy QUERY`, including the old optional filter in `list QUERY`, are
+intentionally rejected instead of being reinterpreted. This is a breaking
+pre-alpha CLI change made to keep selectors out of shell history and process
+arguments. Scripts that parsed the former `Added ID` or `Updated ID` status also
+must be updated; those identifiers are no longer emitted.
+
+Do not type a legacy positional selector to test the rejection with real data:
+the shell and kernel have already received that argument before PVault can
+reject it. Use only synthetic text when checking compatibility errors.
+
+Record metadata is sensitive even when it is not a password. `list`, `show`,
+and a non-copying `pick` therefore refuse non-terminal stdout by default.
+`rescue verify` applies the same rule to authenticated snapshot identity. The
+`--allow-redirect` option is an explicit acknowledgement for a destination the
+user has already made private; it does not encrypt, erase, or otherwise protect
+that destination. `pick --copy` does not print record metadata and cannot be
+combined with `--allow-redirect`. `shell` requires both stdin and stdout to be
+terminals.
+
+`show` omits password values and custom fields marked secret. `copy` is the
+normal way to retrieve a password. Built-in fields are selected with
+`--field password`, `username`, or `url`. `--field custom` lists sanitized
+custom-field names on `/dev/tty` and asks for a private ordinal selection, so
+duplicate names remain selectable and arbitrary names never enter `argv`.
+PVault does not accept a password through `argv` and does not offer a
+plaintext password export command. `generate` always offers the generated
+password through the clipboard; it never prints it. Successful `add` and
+`edit` messages are generic and do not disclose a persistent record ID.
+
+The internal picker is the default. Opting into `--rofi` or configuring
+`picker=rofi` sends rofi only a sanitized display title and a random ephemeral
+token for that invocation, never the persistent record ID. Rofi is executed
+with an allowlisted display/runtime/authentication/locale environment; it is
+still an external process that can observe every displayed title.
 
 `passwd` normally authenticates with the current master password. With
 `--recovery FILE`, it reads the recovery key from FILE and allows a new master
@@ -205,7 +239,8 @@ that a damaged active snapshot can still authenticate.
 prints is explicitly marked unauthenticated. `rescue verify` requires either a
 master password from the TTY or a recovery file, authenticates the complete
 AEAD body, parses canonical CBOR, and prints only version, vault ID, generation,
-record count, and the encrypted snapshot hash. It never prints record fields.
+record count, and the encrypted snapshot hash. It never prints record fields,
+and redirected output requires `--allow-redirect`.
 
 `rescue recover` authenticates first, then publishes a byte-exact encrypted copy
 at a new path with no-replace semantics, mode 0400, file/directory `fsync()`, and
@@ -224,7 +259,7 @@ policy, and lossless transformation tests.
 After installing PVault, add a binding such as this to the i3 configuration:
 
 ```text
-bindsym $mod+p exec --no-startup-id alacritty -e pvault pick --copy
+bindsym $mod+p exec --no-startup-id alacritty -e pvault copy
 ```
 
 Use your preferred terminal in place of `alacritty`. PVault does not edit the
