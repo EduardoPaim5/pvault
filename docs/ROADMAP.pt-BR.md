@@ -72,6 +72,11 @@ Infraestrutura entregue neste marco:
   ou recovery;
 - restore drill local descartável com canários sintéticos, backup, mutação,
   rescue, verificação pelos dois keyslots e restore em caminho isolado.
+- protocolo manual A/B/A de restauração externa com request, resultado e
+  receipt em namespaces SSH distintos, bytes sintéticos vinculados por hash,
+  clone independente no mesmo commit, commitments por máquina, expiração e
+  ledgers anti-replay. Seus testes unitários de parser podem rodar no CI, mas
+  nunca fecham o gate humano em uma segunda máquina;
 - configuração aberta por descritor e validada quanto a owner, modo, links,
   tipo, parent, limites, NUL e duplicatas, com parsing transacional e testes
   contra symlink, hardlink, FIFO e arquivo superdimensionado.
@@ -110,24 +115,28 @@ serem reinterpretadas ou manterem vazamento compatível. `--allow-redirect` não
 é um selo de segurança: apenas registra que o operador escolheu conscientemente
 um destino não-TTY e assume suas permissões, logs e retenção.
 
+Estado dos ensaios manuais em 2026-07-13: o canário live i3/X11 foi reportado
+`PASS` no commit `ca34379`, com os limites de TTL e X11 já documentados. O novo
+protocolo de restauração externa ainda não foi executado em uma segunda máquina
+e, portanto, ainda não produziu receipt.
+
 Permanecem como gates da fase:
 
 - auditoria independente do formato, parser, memória e processos;
 - redesenhar a integração Wayland antes de qualquer habilitação em produção; o
   experimento atual e seu teste verde não satisfazem cleanup ou revogação;
-- execução humana de `scripts/test-live-x11-i3.sh` na sessão i3/X11 nativa,
-  nunca pelo CI, com consentimento explícito para substituir o clipboard ativo;
-  o ensaio usa apenas canário sintético, não lê, salva nem restaura o valor
-  anterior e aborta ao detectar clipboard manager. O TTL encerra a posse da
-  seleção pelo PVault, mas não prova revogação ou apagamento; este gate só fecha
-  depois que uma pessoa executar e revisar o resultado;
+- repetição humana de `scripts/test-live-x11-i3.sh` para cada release candidate
+  na sessão i3/X11 nativa, nunca pelo CI. O `PASS` já reportado não prova
+  revogação, apagamento nem confidencialidade contra outros clientes X11;
 - CI em arquiteturas e libcs diferentes;
 - campanhas longas de fuzzing, minimização e triagem privada dos artefatos;
 - reprodução cruzada em duas máquinas e toolchains independentes;
 - publicação efetiva de release assinada e checksum real no PKGBUILD;
 - congelamento do formato v1.0 com vetores independentes e drill testado de
   rescue, rollback-copy e restore;
-- repetição do restore drill em uma máquina separada;
+- conclusão do protocolo A/B/A em [`EXTERNAL_RESTORE.md`](EXTERNAL_RESTORE.md)
+  numa máquina e armazenamento separados, com receipt assinado e revisado; um
+  teste unitário do parser no CI nunca substitui essa execução;
 - auditoria independente do novo limite de metadados da CLI, incluindo
   redirecionamento explícito, picker externo e regressões contra argv, ambiente,
   stdout/stderr e logs.
