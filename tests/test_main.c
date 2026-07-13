@@ -155,6 +155,13 @@ static void process_hardening_is_active(void)
     PV_CHECK(sigismember(&blocked, SIGCHLD) == 0);
 }
 
+#ifdef PVAULT_TEST_SECURE_ALLOC_TRACKING
+static void secure_allocator_is_balanced(void)
+{
+    PV_CHECK(pv_test_secure_alloc_outstanding() == 0U);
+}
+#endif
+
 int main(void)
 {
     pv_status status;
@@ -178,6 +185,9 @@ int main(void)
     pv_test_backup_retention_suite();
 #ifdef PVAULT_TEST_FAULT_INJECTION
     pv_test_store_fault_suite();
+#endif
+#ifdef PVAULT_TEST_SECURE_ALLOC_TRACKING
+    pv_test_run("secure_allocator.is_balanced", secure_allocator_is_balanced);
 #endif
 
     pv_global_cleanup();
