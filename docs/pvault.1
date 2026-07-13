@@ -149,7 +149,9 @@ content is not displayed.
 Open an interactive session. The decrypted vault stays only in the current
 process and locks after the configured inactivity timeout (300 seconds by
 default). Both stdin and stdout must be terminals; shell metadata is never
-permitted on redirected stdout.
+permitted on redirected stdout. If the clipboard backend is unavailable, the
+shell may still open for read-only list/show work, but its copy action is
+refused and no secret is sent.
 .TP
 .B help
 Display the commands supported by the installed revision.
@@ -236,30 +238,56 @@ pass rather than risking deletion. Managed candidates are AEAD-authenticated,
 CBOR-parsed, and required to carry the generation encoded in their filename
 before deletion. Backup names are published atomically without replacement.
 .SH CLIPBOARD
-On X11, PVault uses
+Installable PVault binaries support only native X11 and use
 .B xclip
-as a foreground selection owner. On Wayland it uses
-.BR wl-copy .
-The helper is executed directly without a shell; the secret travels through an
-anonymous pipe, not an argument or environment variable.
+as a foreground selection owner. The helper is executed directly without a
+shell; the secret travels through an anonymous pipe, not an argument or
+environment variable.
 .PP
-Wayland values that are valid UTF-8 without NUL use
-.BR text/plain;charset=utf-8 ;
-other byte strings use
-.BR application/octet-stream .
-The receiving application may decline a binary MIME type.
+The backend requires an empty
+.BR WAYLAND_DISPLAY ,
+an exact
+.BR XDG_SESSION_TYPE=x11 ,
+and a non-empty
+.BR DISPLAY .
+Unknown or missing session metadata fails closed. Direct
+.B copy
+and
+.B "pick --copy"
+apply this gate before receiving or decrypting the master password.
+.B generate
+applies the same check before creating a value.
+The
+.B shell
+probes the backend before unlock but may still open for read-only operations;
+its copy action remains unavailable. No supported path sends a secret to a
+Wayland or XWayland clipboard owner.
+.PP
+This classification trusts process environment metadata. PVault does not
+authenticate the X server behind
+.BR DISPLAY ;
+forging an X11 session type while hiding Wayland indicators can bypass the
+classification, but is not a supported configuration.
 .PP
 PVault reports a successful transport after the payload is written to the pipe,
 the write end is closed, the owner is observed alive, and the expiration timer
 is armed. This does not prove that the external backend acquired a usable
 selection, so diagnostics say queued rather than copied. The timer includes time
-spent suspended. At expiration PVault terminates only the clipboard owner it
-created. It does not copy an empty value, so newer clipboard content is not
-intentionally erased. The owner is also terminated by the kernel if its PVault
-supervisor dies abruptly.
-Clipboard managers and applications can retain a password after reading it;
-expiration cannot revoke an already consumed copy. X11 clients in the same
-session can request the selection.
+spent suspended. On X11, expiration terminates only the clipboard owner PVault
+created and does not publish an empty replacement selection.
+.PP
+The source tree retains a
+.B wl-copy
+owner and best-effort clear path only in explicit experimental test targets
+that are not installed. The headless Weston characterization passes while
+reproducing retention of synthetic bytes after owner exit and a clear request;
+that result does not certify support, cleanup, or revocation. Destroying the
+disposable compositor removes test state as harness cleanup, not as a PVault
+security property.
+.PP
+X11 clipboard managers and applications can retain a password after reading
+it; expiration cannot revoke an already consumed copy. Other X11 clients in
+the same session can request the selection.
 .SH PICKER AND METADATA OUTPUT
 The internal picker reads and renders through
 .I /dev/tty

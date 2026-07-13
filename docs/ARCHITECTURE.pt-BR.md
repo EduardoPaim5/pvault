@@ -20,7 +20,7 @@ reprodutíveis e auditorias, mas não substitui uma auditoria de segurança.
 - Nenhum segredo ou seletor de registro é aceito por argumento, variável de
   ambiente ou arquivo temporário em texto claro.
 - Senhas não são exibidas pela interface normal; a recuperação usual usa um
-  clipboard de curta duração.
+  clipboard de curta duração, sem tratar TTL como revogação forte.
 - Metadados descriptografados não são enviados por padrão a stdout
   redirecionado; uma exceção exige `--allow-redirect` explícito.
 - Falhar ao bloquear uma região secreta na RAM é erro fatal, sem downgrade.
@@ -38,7 +38,7 @@ pvault CLI / shell / picker
         |
         +-- entrada segura em /dev/tty
         +-- gate de stdout para metadados descriptografados
-        +-- supervisor pvault-clip -- xclip ou wl-copy
+        +-- supervisor pvault-clip -- xclip em X11 nativo
         |
         v
 modelo em arena segura (records, strings, VMK)
@@ -126,6 +126,15 @@ qualquer divergência dos limites documentados.
 
 ## 6. Ciclo de vida da memória ao ler uma senha
 
+Nos fluxos diretos `copy` e `pick --copy`, a admissão do backend ocorre antes
+deste ciclo: os binários instaláveis exigem `WAYLAND_DISPLAY` vazio,
+`XDG_SESSION_TYPE=x11` e `DISPLAY` não vazio antes de receber ou descriptografar
+a senha mestra. Metadados ausentes ou desconhecidos falham fechados. `generate`
+aplica o mesmo gate antes de gerar o valor. `shell` também prepara o backend
+antes do unlock, mas pode abrir o cofre para `list`/`show` quando ele está
+indisponível; nesse caso, a ação interna `copy` é recusada e nenhum segredo é
+enviado.
+
 1. Antes da descriptografia, o processo desabilita core dumps e `ptrace`
    ordinário com `RLIMIT_CORE=0` e `PR_SET_DUMPABLE=0`. O CLI também restaura
    `SIGCHLD` para a ação default e o desbloqueia antes de criar subprocessos,
@@ -195,22 +204,38 @@ externo ao núcleo confiável e observa os títulos exibidos.
 ## 9. Clipboard e i3
 
 `pvault copy` cria o supervisor antes de descriptografar e seleciona o registro
-no picker interno. O segredo nunca entra em `argv`, ambiente ou shell. Em X11 é
-executado `/usr/bin/xclip`; em Wayland, `/usr/bin/wl-copy`. Um resultado de
-transporte bem-sucedido significa que o payload foi escrito no pipe, o lado de
-escrita foi fechado, o owner foi observado vivo e o timer foi armado; não prova
-que o backend externo adquiriu uma seleção utilizável, por isso a CLI diz
-"queued". Um `timerfd` baseado em `CLOCK_BOOTTIME` expira apenas o processo
-owner criado pelo PVault após, por padrão, dez segundos; o tempo suspenso do
-notebook também conta. Worker e owner normalizam a máscara e as disposições
-herdadas de SIGTERM/SIGINT/SIGHUP/SIGCHLD. O owner configura
-`PR_SET_PDEATHSIG`: se o supervisor sofrer crash, OOM ou `SIGKILL`, o kernel
-envia `SIGTERM` ao owner em vez de deixá-lo oferecendo a senha indefinidamente.
-Assim, um clipboard mais novo do usuário não é sobrescrito por uma limpeza
-vazia.
+no picker interno. O segredo nunca entra em `argv`, ambiente ou shell. Os
+targets instaláveis executam `/usr/bin/xclip` somente quando
+`WAYLAND_DISPLAY` está vazio, `XDG_SESSION_TYPE` é exatamente `x11` e `DISPLAY`
+não está vazio. `copy` e `pick --copy` aplicam isso antes do prompt ou unlock;
+`generate`, antes de criar o valor. O `shell` ainda pode desbloquear para
+operações de leitura quando o gate falha, mas sua ação `copy` permanece
+indisponível e não envia o segredo.
 
-No Wayland, texto UTF-8 sem NUL usa `text/plain;charset=utf-8`; slices binários
-usam `application/octet-stream`, preservando bytes sem rotulá-los como texto.
+Essa classificação confia no ambiente do processo: o PVault não autentica o
+servidor referenciado por `DISPLAY`. Forjar `XDG_SESSION_TYPE=x11` e ocultar o
+indicador Wayland pode contornar a classificação, mas não constitui uma
+configuração suportada nem amplia a garantia de X11 nativo.
+
+Um resultado de transporte X11 bem-sucedido significa que o payload foi escrito
+no pipe, o lado de escrita foi fechado, o owner foi observado vivo e o timer foi
+armado; não prova que o backend adquiriu uma seleção utilizável, por isso a CLI
+diz "queued". Um `timerfd` baseado em `CLOCK_BOOTTIME` trata o TTL, por padrão
+dez segundos, incluindo tempo em suspensão. Worker e owner normalizam a máscara
+e as disposições herdadas de SIGTERM/SIGINT/SIGHUP/SIGCHLD. O supervisor expira
+somente o processo `xclip` que criou e não publica uma seleção vazia que possa
+substituir conteúdo mais novo. X11 nativo sob i3 é o caminho documentado para a
+avaliação desktop inicial, mas outro cliente ou manager ainda pode reter o que
+já leu; TTL não é revogação forte.
+
+O código de owner `wl-copy` e de clear best-effort existe somente em targets de
+teste explicitamente experimentais e não instaláveis. Esses targets permitem
+caracterizar a fronteira sem colocá-la no produto. No Weston headless, o harness
+reproduz que os bytes sintéticos continuam recuperáveis depois da saída do
+owner e da solicitação de clear. Portanto, um teste verde registra justamente
+uma retenção incompatível com a promessa de cleanup/revogação e não certifica
+suporte Wayland. A destruição do compositor descartável ao final remove apenas
+o estado do teste; é cleanup do harness, não uma propriedade do PVault.
 
 Exemplo i3:
 

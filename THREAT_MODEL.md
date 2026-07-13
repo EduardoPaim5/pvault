@@ -40,14 +40,16 @@ PVault trusts:
 - the current user's account while the vault is unlocked; and
 - the randomness supplied through libsodium.
 
-`xclip`, `wl-copy`, optional `rofi`, the X11/Wayland compositor, terminal,
-window manager, and clipboard manager are outside the cryptographic core. Once
-a password is sent to the clipboard owner, those components can observe or
-retain it. Opting into rofi exposes each sanitized display title and a random
-token valid only for that picker invocation to the external process. The token
-is not the persistent record identifier. Rofi receives only an allowlisted
-display, runtime, authentication, home, and locale environment, but remains
-outside the trusted core. The in-process picker is the default.
+`xclip`, optional `rofi`, the X11 server, terminal, window manager, and
+clipboard manager are outside the cryptographic core. Once a password is sent
+to the X11 clipboard owner, those components can observe or retain it. `wl-copy`,
+`wl-paste`, and the disposable Weston compositor occur only in non-installable
+experimental tests and are likewise untrusted; installed binaries do not send
+secrets to them. Opting into rofi exposes each sanitized display title and a
+random token valid only for that picker invocation to the external process.
+The token is not the persistent record identifier. Rofi receives only an
+allowlisted display, runtime, authentication, home, and locale environment, but
+remains outside the trusted core. The in-process picker is the default.
 
 ## Adversaries considered
 
@@ -231,29 +233,47 @@ credential policy, and lossless transactional route.
 
 ### Clipboard
 
-PVault sends a requested field through an anonymous pipe to a short-lived
-clipboard owner. The owner is started without a shell and the secret is never
-an argument or environment variable. A supervisor expires only the owner it
-created. The owner requests a parent-death signal from the kernel, so abrupt
-supervisor death also terminates it. The inherited signal mask and the
-SIGTERM/SIGINT/SIGHUP/SIGCHLD dispositions are normalized before the worker and
-owner run. A successful transport result means the payload was written to the
-pipe, its write end was closed, the owner was observed alive, and a
-`CLOCK_BOOTTIME` timer was armed; suspend time therefore counts toward the TTL.
-It cannot prove that an external backend consumed the pipe or acquired a usable
-selection, so the CLI describes the value as queued rather than copied. PVault
-does not overwrite the clipboard with an empty string, because that could erase
-newer user content.
+The installable clipboard implementation admits `xclip` only when
+`WAYLAND_DISPLAY` is empty, `XDG_SESSION_TYPE` is exactly `x11`, and `DISPLAY`
+is non-empty; unknown or missing session metadata fails closed. Direct `copy`
+and `pick --copy` apply the gate before receiving or decrypting the master
+password, and `generate` applies it before creating a value. `shell` probes the
+backend before unlock but may still open the vault for read-only actions; its
+internal copy action remains unavailable and sends no secret. Other
+non-clipboard commands are not represented by this backend decision.
 
-Textual UTF-8 values without NUL are offered to Wayland as
-`text/plain;charset=utf-8`; other byte strings use `application/octet-stream`
-so the transport does not falsely label arbitrary vault values as UTF-8. The
-receiving application still decides whether it can consume that MIME type.
+This classification trusts process environment metadata; PVault does not
+authenticate the display server behind `DISPLAY`. A caller that forges
+`XDG_SESSION_TYPE=x11` and removes the Wayland indicator can bypass the
+classification. Such a launch is unsupported and remains outside the claimed
+native-X11 path.
 
-Expiration limits how long PVault offers the selection. It cannot revoke a copy
-already requested by an application or clipboard manager. X11 provides no
-isolation between mutually untrusted clients in the same session. Clipboard use
-therefore remains an acknowledged exposure.
+On admitted native X11, PVault sends a requested field through an anonymous
+pipe to a short-lived `xclip` owner. The owner is started without a shell and
+the secret is never an argument or environment variable. A supervisor expires
+only the owner it created. The owner requests a parent-death signal from the
+kernel, so abrupt supervisor death also terminates it. The inherited signal
+mask and the SIGTERM/SIGINT/SIGHUP/SIGCHLD dispositions are normalized before
+the worker and owner run. A successful transport result means the payload was
+written to the pipe, its write end was closed, the owner was observed alive,
+and a `CLOCK_BOOTTIME` timer was armed; suspend time therefore counts toward the
+TTL. It cannot prove that `xclip` acquired a usable selection, so the CLI
+describes the value as queued rather than copied. PVault expires its own owner
+without publishing an empty selection that could erase newer user content.
+
+The Wayland owner and best-effort clear paths are compiled only into explicit,
+non-installable experimental test targets. Their headless Weston test is a
+characterization, not a product conformance test: a green run reproduces that
+the synthetic bytes remain retrievable after owner exit and a clear request.
+That retained value is evidence against claiming cleanup or revocation, not
+evidence of safe support. Destroying the disposable compositor later removes
+test state as harness cleanup and must not be attributed to PVault.
+
+Expiration limits how long PVault owns the native X11 selection. It cannot
+strongly revoke a copy already requested or retained by an application or
+clipboard manager, and X11 provides no isolation between mutually untrusted
+clients in the same session. Clipboard use therefore remains an acknowledged
+exposure.
 
 ## Operational assumptions
 
