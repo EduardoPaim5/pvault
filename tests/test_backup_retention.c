@@ -1019,6 +1019,31 @@ static void retention_retry_after_atomic_rename_is_idempotent(void)
     ));
     PV_CHECK(retention_hash_file(automatic_path, before_hash));
 
+    pv_store_test_fault_point_fail(
+        PV_STORE_FAULT_POINT_AUTOMATIC_BACKUP_COLLISION_FSYNC,
+        EIO
+    );
+    status = pv_store_save(&vault, &header, 2U);
+    PV_CHECK_STATUS(status, PV_ERR_IO);
+    PV_CHECK(pv_store_test_fault_point_hit_count(
+        PV_STORE_FAULT_POINT_AUTOMATIC_BACKUP_COLLISION_FSYNC
+    ) == 1U);
+    pv_store_test_fault_reset();
+    PV_CHECK(vault.generation == source_generation);
+    PV_CHECK(vault.dirty);
+    PV_CHECK(retention_snapshot_has_generation(
+        vault_path,
+        recovery_key,
+        source_generation,
+        0U
+    ));
+    PV_CHECK(retention_hash_file(automatic_path, after_hash));
+    PV_CHECK(sodium_memcmp(
+        before_hash,
+        after_hash,
+        sizeof before_hash
+    ) == 0);
+
     status = pv_store_save(&vault, &header, 2U);
     PV_CHECK_STATUS(status, PV_OK);
     PV_CHECK(vault.generation == source_generation + 1U);
